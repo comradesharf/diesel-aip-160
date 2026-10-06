@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "diesel-aip-160"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "diesel",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "diesel-aip-160-derive"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "proc-macro2",
  "quote",
