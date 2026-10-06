@@ -40,7 +40,10 @@ fn feature_compiles_typed_predicates_with_backend_bind_syntax() {
     {
         assert!(query.contains("\"records\".\"name\" = $1"), "{query}");
         assert!(query.contains("\"records\".\"id\" >= $2"), "{query}");
-        assert!(query.contains("\"records\".\"note\" IS NOT NULL"), "{query}");
+        assert!(
+            query.contains("\"records\".\"note\" IS NOT NULL"),
+            "{query}"
+        );
     }
     #[cfg(any(feature = "sqlite", feature = "mysql"))]
     {
@@ -59,7 +62,10 @@ fn feature_handles_nullable_values_and_wildcards() {
 
     let wildcard_query = sql("name='Al*'");
     assert!(wildcard_query.contains(" LIKE "), "{wildcard_query}");
-    assert!(wildcard_query.contains("-- binds: [\"Al%\""), "{wildcard_query}");
+    assert!(
+        wildcard_query.contains("-- binds: [\"Al%\""),
+        "{wildcard_query}"
+    );
 }
 
 #[test]

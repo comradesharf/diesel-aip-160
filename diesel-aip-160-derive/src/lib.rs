@@ -1,7 +1,19 @@
+//! Derive macros for AIP-160 filtering with Diesel.
+//!
+//! Prefer the macros re-exported by `diesel_aip_160`, which also provides the
+//! parser, compiler, and runtime helpers required by generated code.
+//! [`Aip160Filter`] requires a named-field struct with
+//! `#[diesel(table_name = ...)]` and one database backend enabled on the runtime
+//! crate. [`Aip160Jsonb`] maps Rust field names to stored JSONB keys.
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Fields, GenericArgument, PathArguments, Type, parse_macro_input};
 
+/// Generate a typed filter compiler and a `compile_filter` method for a Diesel model.
+///
+/// Use `#[diesel(table_name = ...)]` to specify the table and `#[aip160(skip)]`
+/// to exclude fields from filtering.
 #[proc_macro_derive(Aip160Filter, attributes(aip160, diesel))]
 pub fn derive_aip160_filter(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

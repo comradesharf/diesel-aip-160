@@ -2,7 +2,17 @@
 name = "diesel-aip-160"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+keywords.workspace = true
+description = "Parse AIP-160 filters and compile typed, parameterized Diesel predicates"
+categories = ["database", "parser-implementations"]
+readme = "README.md"
+documentation = "https://docs.rs/diesel-aip-160"
 publish = true
+
+[package.metadata.docs.rs]
+features = ["postgres"]
 
 [dependencies]
 anyhow.workspace = true

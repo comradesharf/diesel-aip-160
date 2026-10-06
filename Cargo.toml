@@ -5,6 +5,9 @@ members = ["diesel-aip-160", "diesel-aip-160-derive"]
 [workspace.package]
 version = "0.1.0-beta.1"
 edition = "2024"
+rust-version = "1.99"
+repository = "https://github.com/comradesharf/diesel-aip-160"
+keywords = ["diesel", "aip-160", "filter", "sql", "query"]
 
 [workspace.metadata]
 name = "diesel-aip-160"

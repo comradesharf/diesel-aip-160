@@ -1,6 +1,6 @@
 //! AIP-160 syntax, independent of field types and the database backend.
 //!
-//! Follows https://google.aip.dev/assets/misc/ebnf-filtering.txt.
+//! Follows <https://google.aip.dev/assets/misc/ebnf-filtering.txt>.
 //! OR binds more tightly than both explicit AND and whitespace conjunctions.
 
 use anyhow::{Result, bail, ensure};

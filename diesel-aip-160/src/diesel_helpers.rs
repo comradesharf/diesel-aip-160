@@ -91,7 +91,7 @@ impl StringSqlType for Nullable<Text> {
     const NULLABLE: bool = true;
 }
 
-/// Compare either a Text or Nullable<Text> column without losing table typing.
+/// Compare either a `Text` or `Nullable<Text>` column without losing table typing.
 /// `None` emits IS NULL / IS NOT NULL, and is rejected for nonnullable columns
 /// or ordering operators. `Some` always binds a string, including "null".
 ///
@@ -143,7 +143,7 @@ impl IntegerSqlType for Nullable<Integer> {
     const NULLABLE: bool = true;
 }
 
-/// Compare Integer or Nullable<Integer> columns using bound i32 values.
+/// Compare `Integer` or `Nullable<Integer>` columns using bound `i32` values.
 /// `None` supports only equality/inequality on nullable columns and emits
 /// IS NULL / IS NOT NULL. Other comparisons preserve SQL NULL semantics.
 pub fn compare_integer_column<C>(

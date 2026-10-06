@@ -1,3 +1,19 @@
+//! Parse AIP-160 filters and compile typed, parameterized Diesel predicates.
+//!
+//! The [`parser`] and [`compiler`] work without a database backend. Enable one
+//! of `sqlite`, `mysql`, or `postgres` to use [`Aip160Filter`] on Diesel models.
+//! Backend features are mutually exclusive. PostgreSQL additionally supports
+//! JSONB filtering with [`Aip160Jsonb`].
+//!
+//! ```
+//! use diesel_aip_160::parser::parse_filter;
+//!
+//! let expression = parse_filter("name=Alice AND id>=10")?;
+//! assert!(expression.is_some());
+//! assert!(parse_filter("   ")?.is_none());
+//! # Ok::<(), diesel_aip_160::anyhow::Error>(())
+//! ```
+
 pub mod compiler;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub mod diesel_helpers;
