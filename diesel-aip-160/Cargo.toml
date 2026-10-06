@@ -3,6 +3,7 @@ name = "diesel-aip-160"
 edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 description = "Parse AIP-160 filters and compile typed, parameterized Diesel predicates"

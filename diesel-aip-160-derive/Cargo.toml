@@ -3,6 +3,7 @@ name = "diesel-aip-160-derive"
 edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 description = "Derive macros for AIP-160 filtering with Diesel"
