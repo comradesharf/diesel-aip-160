@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["diesel-aip-160", "diesel-aip-160-derive"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.metadata]
+name = "diesel-aip-160"
+
+[workspace.dependencies]
+anyhow = "1"
+diesel = "2"

@@ -1,0 +1,13 @@
+[package]
+name = "diesel-aip-160-derive"
+edition.workspace = true
+version.workspace = true
+publish = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }

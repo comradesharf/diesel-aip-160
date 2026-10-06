@@ -1,0 +1,33 @@
+[package]
+name = "diesel-aip-160"
+edition.workspace = true
+version.workspace = true
+publish = true
+
+[dependencies]
+anyhow.workspace = true
+diesel = { workspace = true, optional = true, default-features = false }
+serde_json = "1"
+diesel-aip-160-derive = { path = "../diesel-aip-160-derive", version = "0.1.0" }
+
+[features]
+default = []
+sqlite = ["dep:diesel", "diesel/sqlite"]
+mysql = ["dep:diesel", "diesel/mysql_backend"]
+postgres = ["dep:diesel", "diesel/postgres_backend", "diesel/serde_json"]
+
+[[test]]
+name = "derive"
+required-features = ["postgres"]
+
+[[example]]
+name = "sqlite"
+required-features = ["sqlite"]
+
+[[example]]
+name = "mysql"
+required-features = ["mysql"]
+
+[[example]]
+name = "postgres"
+required-features = ["postgres"]
