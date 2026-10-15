@@ -42,9 +42,14 @@ and `:*` checks path presence. JSONB is unavailable with SQLite and MySQL.
 
 Filters support `=`, `!=`, `<`, `<=`, `>`, `>=`, `:`, `AND`, `OR`, `NOT`,
 parentheses, and bare text search. Text equality supports `*` wildcards;
-`text:value` performs substring search. Nullable fields accept unquoted
-`null` with `=` and `!=`, while `field:*` checks presence. Integer values
-must be unquoted signed 32-bit decimals. Values are bound as parameters.
+`text:value` and bare text perform case-insensitive substring search using
+`LOWER(column) LIKE LOWER(pattern)`. Unicode and locale behavior follow the
+database; SQLite's built-in `LOWER` converts ASCII only. Equality and wildcard
+equality retain their existing operator and collation behavior. `*` is literal
+in substring searches except for the unquoted presence check. Nullable fields
+accept unquoted `null` with `=` and `!=`, while `field:*` checks presence.
+Integer values must be unquoted signed 32-bit decimals. Values are bound as
+parameters.
 
 Run `cargo test --workspace` for parser and compiler tests. Run
 `cargo test -p diesel-aip-160 --features sqlite`, then repeat with `mysql`

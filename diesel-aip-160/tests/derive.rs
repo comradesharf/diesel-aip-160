@@ -42,7 +42,7 @@ fn sql(filter: &str) -> String {
 #[test]
 fn derives_comparisons_from_fields() {
     assert!(sql("id=A").contains("\"stops\".\"id\" = $1"));
-    assert!(sql("name:A").contains("\"stops\".\"name\" LIKE $1"));
+    assert!(sql("name:A").contains("lower(\"stops\".\"name\") LIKE lower($1)"));
     assert!(sql("street=null").contains("\"street\" IS NULL"));
     assert!(sql("street:*").contains("\"street\" IS NOT NULL"));
     assert!(sql("count>=5").contains("\"count\" >= $1"));
@@ -55,7 +55,7 @@ fn derives_comparisons_from_fields() {
 fn global_search_uses_only_text_fields() {
     let query = sql("Central");
     for field in ["id", "name", "street"] {
-        assert!(query.contains(&format!("\"stops\".\"{field}\" LIKE")));
+        assert!(query.contains(&format!("lower(\"stops\".\"{field}\") LIKE lower(")));
     }
     assert!(!query.contains("\"count\" LIKE"));
     assert!(!query.contains("\"location\" LIKE"));

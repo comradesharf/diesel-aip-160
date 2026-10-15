@@ -87,11 +87,11 @@ These examples use the `Record` model above:
 | `id>=10` | Integer comparison |
 | `name="Alice Smith"` | A quoted value containing spaces |
 | `name="Ali*"` | Text equality with a `*` wildcard |
-| `name:lic` | Text substring search |
+| `name:lic` | Case-insensitive text substring search |
 | `note=null` | Nullable text is NULL |
 | `note!=null` or `note:*` | Nullable text is not NULL |
 | `name:*` or `id:*` | Always true for a nonnullable scalar field |
-| `Alice` | Substring search across all filterable text fields |
+| `Alice` | Case-insensitive substring search across all filterable text fields |
 | `name=(Alice OR Bob)` | Apply the comparison to either literal |
 | `name=Alice AND id>=10` | Combine predicates with AND |
 | `NOT (name=Alice OR name=Bob)` | Negate a group |
@@ -108,6 +108,18 @@ than AND**: `name=Alice AND id=1 OR id=2` means
 For text `=` and `!=`, `*` is a wildcard even inside quotes. For text `:` and
 global search, `*` is literal except for the unquoted presence check `field:*`.
 SQL LIKE characters `%`, `_`, and backslash are escaped in search patterns.
+
+Text `:` and global search use `LOWER(column) LIKE LOWER(pattern)` on SQLite,
+MySQL, and PostgreSQL. For example, `name:ali` matches `Alice`, `ALICE`, and
+`Malik`. Case conversion follows the database's Unicode, locale, and collation
+rules; SQLite's built-in `LOWER` handles ASCII case conversion only. This does
+not guarantee accent-insensitive matching. Substring searches may need
+backend-specific indexing for large tables.
+
+Text comparisons (`=`, `!=`, and ordering) and `*` wildcard equality retain
+their existing SQL operator and collation behavior; they are not normalized
+with `LOWER`. NULL and presence checks and JSONB containment are unchanged.
+
 Unquoted `null` has NULL semantics only for nullable text; `note="null"`
 matches the literal string instead. SQL NULL behavior still applies when
 negating predicates over nullable columns.
@@ -179,7 +191,9 @@ let predicate = diesel_aip_160::compiler::compile(
 
 For a custom backend, implement `Aip160FilterCompiler` with your own predicate
 type. Supply field types and searchable text fields, typed comparisons, LIKE
-operations, constants, and logical composition. The compiler parses and
+operations, constants, and logical composition. Implement `like` for wildcard
+equality and `ilike` for case-insensitive substring and global searches; custom
+compiler implementations must now supply `ilike`. The compiler parses and
 validates the filter before dispatching these operations. JSONB methods have
 default implementations that return unsupported-operation errors.
 

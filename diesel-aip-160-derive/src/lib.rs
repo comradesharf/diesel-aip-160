@@ -124,6 +124,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut comparisons = Vec::new();
     let mut types = Vec::new();
     let mut likes = Vec::new();
+    let mut ilikes = Vec::new();
     let mut text_names = Vec::new();
     let mut json_types = Vec::new();
     let mut json_comparisons = Vec::new();
@@ -205,6 +206,16 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 quote!(#column.like(pattern).escape('\\'))
             };
             likes.push(quote!(#name => Ok(Box::new(#expression)),));
+            ilikes.push(quote! {
+                #name => Ok(Box::new(
+                    ::diesel_aip_160::diesel_helpers::lower(#column.nullable())
+                        .like(::diesel_aip_160::diesel_helpers::lower(
+                            pattern.into_sql::<::diesel_aip_160::diesel::sql_types::Text>().nullable()
+                        ))
+                        .escape('\\')
+                        .assume_not_null()
+                )),
+            });
         } else {
             types.push(quote!(#name => Ok(::diesel_aip_160::compiler::FieldType::Int32),));
             comparisons.push(quote! {
@@ -251,6 +262,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             fn text_fields(&self) -> &'static [&'static str] { &[#(#text_names),*] }
             fn like(&self, field: &str, pattern: String) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
                 match field { #(#likes)* _ => ::diesel_aip_160::anyhow::bail!("unknown or unsupported string field `{field}"), }
+            }
+            fn ilike(&self, field: &str, pattern: String) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+                match field { #(#ilikes)* _ => ::diesel_aip_160::anyhow::bail!("unknown or unsupported string field `{field}`"), }
             }
             fn json_compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator, value: ::diesel_aip_160::serde_json::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
                 #(#json_comparisons)*
