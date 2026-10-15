@@ -45,7 +45,11 @@ pub trait Aip160FilterCompiler {
     fn not(&self, predicate: Self::Predicate) -> Self::Predicate;
     fn field_type(&self, field: &str) -> Result<FieldType>;
     fn text_fields(&self) -> &'static [&'static str];
+    /// Match a wildcard pattern using the backend's existing LIKE semantics.
     fn like(&self, field: &str, pattern: String) -> Result<Self::Predicate>;
+    /// Match a substring pattern without regard to case. Patterns are already
+    /// escaped; implementations must preserve SQL NULL semantics.
+    fn ilike(&self, field: &str, pattern: String) -> Result<Self::Predicate>;
     fn json_compare(
         &self,
         field: &str,
@@ -131,9 +135,9 @@ fn compile_expression<C: Aip160FilterCompiler>(
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("global search is not supported"))?;
                 let pattern = substring_pattern(&value.text);
-                let predicate = compiler.like(first, pattern.clone())?;
+                let predicate = compiler.ilike(first, pattern.clone())?;
                 fields.try_fold(predicate, |left, field| {
-                    Ok(compiler.or(left, compiler.like(field, pattern.clone())?))
+                    Ok(compiler.or(left, compiler.ilike(field, pattern.clone())?))
                 })
             }
         }
@@ -240,7 +244,7 @@ fn compare<C: Aip160FilterCompiler>(
                 FilterLiteral::Null
             } else {
                 if operator == Comparator::Has {
-                    return compiler.like(field, substring_pattern(&value.text));
+                    return compiler.ilike(field, substring_pattern(&value.text));
                 }
                 if matches!(operator, Comparator::Equal | Comparator::NotEqual)
                     && value.text.contains('*')
@@ -313,6 +317,7 @@ mod tests {
     enum Predicate {
         Compare(String, ComparisonOperator, FilterLiteral),
         Like(String, String),
+        ILike(String, String),
         Constant(bool),
         And(Box<Predicate>, Box<Predicate>),
         Or(Box<Predicate>, Box<Predicate>),
@@ -374,6 +379,10 @@ mod tests {
 
         fn like(&self, field: &str, pattern: String) -> Result<Predicate> {
             Ok(Predicate::Like(field.to_owned(), pattern))
+        }
+
+        fn ilike(&self, field: &str, pattern: String) -> Result<Predicate> {
+            Ok(Predicate::ILike(field.to_owned(), pattern))
         }
     }
 
@@ -455,10 +464,10 @@ mod tests {
         assert_eq!(
             compiled("name:(Central AND (Station OR Depot))"),
             Predicate::And(
-                Box::new(like("name", "%Central%")),
+                Box::new(ilike("name", "%Central%")),
                 Box::new(Predicate::Or(
-                    Box::new(like("name", "%Station%")),
-                    Box::new(like("name", "%Depot%"))
+                    Box::new(ilike("name", "%Station%")),
+                    Box::new(ilike("name", "%Depot%"))
                 )),
             )
         );
@@ -510,9 +519,6 @@ mod tests {
             ("name='Central*'", "Central%"),
             ("name='*Central'", "%Central"),
             ("name='*Central*'", "%Central%"),
-            ("name:Central", "%Central%"),
-            ("name:'*'", "%*%"),
-            ("name:'50%_off'", "%50\\%\\_off%"),
             (r#"name="a%_*b\\c""#, "a\\%\\_%b\\\\c"),
         ] {
             assert_eq!(compiled(source), like("name", pattern));
@@ -520,6 +526,26 @@ mod tests {
         assert_eq!(
             compiled("name!='Central*'"),
             Predicate::Not(Box::new(like("name", "Central%")))
+        );
+    }
+
+    fn ilike(field: &str, pattern: &str) -> Predicate {
+        Predicate::ILike(field.to_owned(), pattern.to_owned())
+    }
+
+    #[test]
+    fn substring_search_dispatches_case_insensitive_patterns() {
+        for (source, pattern) in [
+            ("name:Central", "%Central%"),
+            ("name:'*'", "%*%"),
+            ("name:'50%_off'", "%50\\%\\_off%"),
+            (r#"name:'a\\b'"#, r"%a\\b%"),
+        ] {
+            assert_eq!(compiled(source), ilike("name", pattern));
+        }
+        assert_eq!(
+            compiled("NOT nickname:Ali"),
+            Predicate::Not(Box::new(ilike("nickname", "%Ali%")))
         );
     }
 
@@ -535,8 +561,8 @@ mod tests {
             "some.domain",
         ] {
             let expected = Predicate::Or(
-                Box::new(like("name", &format!("%{literal}%"))),
-                Box::new(like("nickname", &format!("%{literal}%"))),
+                Box::new(ilike("name", &format!("%{literal}%"))),
+                Box::new(ilike("nickname", &format!("%{literal}%"))),
             );
             assert_eq!(compiled(literal), expected);
             assert_eq!(compiled(&format!("'{literal}'")), expected);
@@ -546,7 +572,7 @@ mod tests {
         };
         assert_eq!(
             compile("Central", &backend).unwrap(),
-            Some(like("nickname", "%Central%"))
+            Some(ilike("nickname", "%Central%"))
         );
         let backend = TestCompiler { text_fields: &[] };
         assert_eq!(

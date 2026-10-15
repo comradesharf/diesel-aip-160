@@ -18,6 +18,12 @@ use diesel::{BoxableExpression, Column};
 
 use super::compiler::ComparisonOperator;
 
+diesel::define_sql_function! {
+    /// Database-native case conversion for case-insensitive text search.
+    /// Unicode and locale behavior depend on the database configuration.
+    fn lower(value: Nullable<Text>) -> Nullable<Text>;
+}
+
 pub type Predicate<Table> = Box<dyn BoxableExpression<Table, Backend, SqlType = Bool>>;
 
 /// Extract a JSONB value by a bound path. PostgreSQL returns SQL NULL for a
