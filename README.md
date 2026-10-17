@@ -373,8 +373,9 @@ without field attributes. Literal values go through the wrapper's decoder and
 are bound as the enum SQL type; ordering follows PostgreSQL declaration order.
 Use a field adapter to override this behavior, for example for numeric ordering.
 
-Select an application adapter explicitly; enum labels are never automatically
-interpreted as numbers or compared in numeric order:
+Select an application adapter explicitly for numeric ordering. Parsing a label
+as a numeric `value_type` validates its code but does not change PostgreSQL's
+comparison order:
 
 ```rust,ignore
 #[derive(Aip160Filter)]
@@ -407,12 +408,31 @@ without changing SQL NULL semantics.
 The complete, compiling [PostgreSQL enum example](diesel-aip-160/examples/postgres_enums.rs)
 shows `Aip160PgEnum` codecs and automatic filtering of stored GTFS labels in
 `NativeRoute`. Its `Route` model overrides filtering with numeric route ordering
-for labels `3`, `100`, `1702`, nullable BIGINT `order`, and application mappings from protobuf pickup/drop-off literals `1`–`4` to stored
+for labels `3`, `100`, `1702`, nullable BIGINT `order`, and application mappings
+from protobuf pickup/drop-off literals `1`–`4` to stored
 GTFS labels `0`–`3`. The numeric adapter explicitly casts enum → text → BIGINT
 using a fixed application SQL expression, so `3 < 100 < 1702` regardless of
 PostgreSQL enum declaration order. The pickup adapter binds a value of the
 custom PostgreSQL SQL type and deliberately rejects ordering. For declaration
 ordering instead, an adapter can use typed enum `.lt()`/`.gt()` expressions.
+
+With the test declaration `('1702', '3', '100')`, the two models differ:
+
+| Filter | `NativeRoute` (stored labels) | `Route` (application adapters) |
+| --- | --- | --- |
+| `route_type<100` | Matches labels `1702` and `3` | Matches only label `3` |
+| `route_type='3'` | Accepts the quoted label | Rejects quoted numeric codes |
+| `continuous_pickup=1` | Matches stored label `1` | Matches stored label `0` |
+| `continuous_pickup>1` | Uses PostgreSQL enum order | Rejects ordering |
+| `continuous_drop_off=null` | Checks `IS NULL` | Checks `IS NULL` |
+| `continuous_drop_off:*` | Checks `IS NOT NULL` | Checks `IS NOT NULL` |
+
+Native enum filtering supports all six comparison operators and `:` as equality,
+accepting quoted or unquoted labels through the codec. The example's adapters
+require unquoted codes: `NumericRoute` accepts only `3`, `100`, and `1702`, and
+`ProtobufPickup` accepts only `1` through `4`. Quoted `null` fails validation
+in both models. Ordinary comparisons retain SQL NULL semantics under `NOT`;
+for example, `NOT continuous_drop_off=1` does not select NULL rows.
 
 All values must be bound parameters. Never concatenate user literals, labels,
 paths, or field names into SQL. Adapter SQL expressions are trusted application
@@ -427,12 +447,13 @@ adapter or `skip`; built-in SQL types dispatch directly from the schema.
 Run the enum SQL-generation tests without a database:
 
 ```sh
-cargo test -p diesel-aip-160 --features postgres --all-targets
+cargo test -p diesel-aip-160 --features postgres --example postgres_enums
 cargo run -p diesel-aip-160 --features postgres --example postgres_enums
 ```
 
 An optional ignored integration test executes Diesel queries against PostgreSQL
-with deliberately reordered enum declarations. It creates session-local types
+with deliberately reordered enum declarations. The Rust schema declarations do
+not create database objects. The test creates session-local types
 and a temporary table only. It requires native libpq and an explicitly selected
 test database:
 

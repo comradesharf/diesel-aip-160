@@ -1,5 +1,51 @@
 //! Derived PostgreSQL enum codecs and automatic filtering, with application
 //! adapters for numeric route ordering and protobuf-to-GTFS mapping.
+//!
+//! Run from the workspace root; SQL generation does not require a database:
+//!
+//! ```sh
+//! cargo run -p diesel-aip-160 --example postgres_enums --features postgres
+//! cargo test -p diesel-aip-160 --example postgres_enums --features postgres
+//! ```
+//!
+//! `Aip160PgEnum` generates `FromSql`/`ToSql` for a single-field tuple wrapper.
+//! Labels are parsed as `value_type` (`i16` here), validated by `from_value`, and
+//! serialized using `to_value` and the value's display representation. The
+//! application supplies these mappings; GTFS and protobuf conventions are not
+//! built into the library. `AsExpression` and `FromSqlRow` provide the additional
+//! Diesel integration for binding and loading the wrappers.
+//!
+//! Two filter models use the same schema and codecs:
+//!
+//! - `NativeRoute` accepts stored labels, quoted or unquoted, and binds typed
+//!   PostgreSQL enum values. It supports all six comparisons; `:` is equality.
+//!   Ordering follows PostgreSQL's enum declaration order, so with labels
+//!   `('1702', '3', '100')`, `route_type<100` matches both `1702` and `3`.
+//! - `Route` overrides automatic filtering with explicit field adapters.
+//!   `NumericRoute` accepts unquoted codes `3`, `100`, and `1702`, casts the
+//!   stored label through text to BIGINT, and compares numerically. Thus
+//!   `route_type<100` matches only `3`. Every stored route label must be
+//!   convertible to BIGINT for queries using this cast to execute successfully.
+//!   `ProtobufPickup` maps unquoted protobuf values `1..=4` to stored GTFS
+//!   labels `0..=3` and permits only equality and inequality (`:` also uses
+//!   equality). For example, `continuous_pickup=1` selects stored label `1`
+//!   with `NativeRoute`, but stored label `0` with `Route`.
+//!
+//! Both models support `field:*` for presence and unquoted `=null`/`!=null`
+//! on nullable fields. Quoted `null` is a label rather than a NULL check and
+//! fails numeric parsing here. Comparisons against NULL retain SQL's
+//! three-valued logic, including under `NOT`; the adapters' `assume_not_null()`
+//! changes Diesel's expression type without adding a SQL NULL fallback.
+//!
+//! The Rust SQL type declarations below do not create database types or tables.
+//! The ignored integration test creates session-local types and a temporary
+//! table on an explicitly supplied database. With native libpq and a PostgreSQL
+//! server available, set `AIP160_TEST_DATABASE_URL` and run:
+//!
+//! ```sh
+//! cargo test -p diesel-aip-160 --features postgres-integration \
+//!     --example postgres_enums postgres_executes -- --ignored
+//! ```
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Nullable};
 use diesel_aip_160::anyhow::{Result, bail, ensure};

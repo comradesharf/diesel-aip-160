@@ -27,6 +27,7 @@ running database:
 cargo run -p diesel-aip-160 --example sqlite --features sqlite
 cargo run -p diesel-aip-160 --example mysql --features mysql
 cargo run -p diesel-aip-160 --example postgres --features postgres
+cargo run -p diesel-aip-160 --example postgres_enums --features postgres
 ```
 
 `#[derive(Aip160Filter)]` reads `#[diesel(table_name = ...)]` and dispatches
@@ -73,17 +74,47 @@ label value type and two fallible conversion functions. It generates
 `Option<Wrapper>`, without field attributes. Your application supplies the enum
 mapping and validation; comparisons follow PostgreSQL enum declaration order.
 
-Other custom fields, or enums needing different filter behavior, opt in with `#[aip160(adapter = MyAdapter)]`. Implement
+Other custom fields, or enums needing different filter behavior, opt in with
+`#[aip160(adapter = MyAdapter)]`. Implement
 `diesel_helpers::FieldAdapter<Column>` to validate/map original `parser::Value`
 literals and return typed, bound Diesel predicates. Ordering is explicit: a
 numeric enum adapter can cast a trusted column expression to BIGINT; a native
 enum comparison instead follows PostgreSQL declaration order. No GTFS mapping
-is built into the library. See the compiling `examples/postgres_enums.rs` for
-route codes, protobuf pickup/drop-off mappings, nullable BIGINT, and adapter NULL
-handling. Run its SQL-generation tests with `--features postgres --all-targets`.
+is built into the library. The compiling
+[PostgreSQL enum example](examples/postgres_enums.rs) compares two models:
+
+- `NativeRoute` accepts quoted or unquoted stored labels and supports all six
+  comparisons, plus `:` as equality. With enum declaration `('1702', '3', '100')`,
+  `route_type<100` matches labels `1702` and `3`.
+- `Route` uses adapters that require unquoted codes. `NumericRoute` accepts
+  `3`, `100`, and `1702`, casts stored labels through text to BIGINT, and makes
+  `route_type<100` match only `3`. All stored route labels must support that cast.
+  `ProtobufPickup` maps protobuf `1..=4` to GTFS labels `0..=3`, allowing only
+  equality and inequality (`:` also uses equality). Thus `continuous_pickup=1`
+  matches stored label `0`, while the native model matches stored label `1`.
+
+Both models support nullable `continuous_drop_off=null`/`!=null` and presence
+checks with `continuous_drop_off:*`. Quoted `null` fails numeric validation.
+Comparisons retain SQL NULL semantics under `NOT`; `assume_not_null()` changes
+Diesel's expression type without adding a SQL NULL fallback. The example also
+covers nullable BIGINT values such as `order=4294967295`.
+
+Run its SQL-generation tests without a database from the workspace root:
+
+```sh
+cargo test -p diesel-aip-160 --features postgres --example postgres_enums
+```
+
 The optional `postgres-integration` feature enables an ignored live PostgreSQL
-test (native libpq and `AIP160_TEST_DATABASE_URL` required); run with
-`--example postgres_enums postgres_executes -- --ignored`.
+test. The Rust schema declarations do not create database objects; the test
+creates session-local types and a temporary table. With native libpq and an
+explicitly selected test database, run:
+
+```sh
+AIP160_TEST_DATABASE_URL=postgres://user:password@localhost/test_db \
+  cargo test -p diesel-aip-160 --features postgres-integration \
+  --example postgres_enums postgres_executes -- --ignored
+```
 
 Adapters own trusted expressions and must bind all input values, never interpolate
 filter literals or field names into SQL. Unknown custom types need an adapter,
