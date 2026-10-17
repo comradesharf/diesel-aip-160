@@ -58,6 +58,58 @@ the Rust field name; unknown fields return `None`. Struct-level
 `#[serde(rename_all = "...")]` is rejected. See the
 [workspace README](../README.md) for complete schema and query examples.
 
+## `Aip160PgEnum`
+
+Enable `postgres` on the runtime crate to generate PostgreSQL enum storage
+conversions for a local wrapper around an enum from another crate:
+
+```rust
+use diesel::deserialize::FromSqlRow;
+use diesel::expression::AsExpression;
+use diesel_aip_160::Aip160PgEnum;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow, Hash, Aip160PgEnum)]
+#[diesel(sql_type = RouteTypeEnum)]
+#[aip160(
+    value_type = i16,
+    from_value = route_type_from_code,
+    to_value = route_type_to_code,
+)]
+pub struct GtfsRouteType(pub RouteType);
+```
+
+Here `RouteTypeEnum` is your Diesel SQL type and `RouteType` comes from your
+dependency. Move your existing domain mappings into two functions:
+
+| Function | Input | Return type |
+| --- | --- | --- |
+| `route_type_from_code` | `i16` | `diesel::deserialize::Result<RouteType>` |
+| `route_type_to_code` | `&RouteType` | `diesel::deserialize::Result<i16>` |
+
+The derive generates `FromSql<RouteTypeEnum, Pg>` and
+`ToSql<RouteTypeEnum, Pg>`, including UTF-8 decoding, `i16` parsing, label
+formatting, and error propagation. Remove your manual implementations.
+`value_type` can also be `String` for nonnumeric labels; it must implement
+`FromStr` and `Display`, with parse errors convertible to Diesel's boxed error.
+Both conversion functions return `Result`; their errors must convert to
+`Box<dyn std::error::Error + Send + Sync>`. The serializer borrows the wrapped
+value, so the inner type need not be `Copy` or `Clone`.
+
+If the dependency already provides compatible fallible conversions, use
+paths such as `RouteType::try_from` directly. The derive cannot infer the
+mapping or validation rules of an external enum. A local wrapper keeps the
+Diesel implementations compatible with Rust's orphan rules.
+
+This generates storage codecs only. For `Aip160Filter`, continue to select a
+`FieldAdapter` to define filter literals and enum ordering. See the
+[compiling codec tests](../diesel-aip-160/tests/pg_enum.rs), including the
+opt-in PostgreSQL round-trip test:
+
+```sh
+AIP160_TEST_DATABASE_URL=postgres://... cargo test -p diesel-aip-160 \
+  --features postgres-integration --test pg_enum -- --include-ignored
+```
+
 ## Development
 
 ```sh

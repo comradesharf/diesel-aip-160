@@ -66,6 +66,11 @@ Run `cargo test --workspace` for parser and compiler tests. Run
 and `postgres`, for backend predicate tests. The Postgres suite also covers
 JSONB.
 
+For PostgreSQL storage conversion of a local wrapper around a dependency enum,
+derive [`Aip160PgEnum`](../diesel-aip-160-derive/README.md#aip160pgenum) with a
+label value type and two fallible conversion functions. It generates
+`FromSql`/`ToSql`; your application supplies the enum mapping and validation.
+
 Custom enum fields opt in with `#[aip160(adapter = MyAdapter)]`. Implement
 `diesel_helpers::FieldAdapter<Column>` to validate/map original `parser::Value`
 literals and return typed, bound Diesel predicates. Ordering is explicit: a

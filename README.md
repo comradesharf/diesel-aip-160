@@ -10,8 +10,8 @@ exact version for reproducible integrations and review changes before upgrading.
 This Rust workspace contains:
 
 - [`diesel-aip-160`](diesel-aip-160): the parser, compiler, and Diesel helpers.
-- [`diesel-aip-160-derive`](diesel-aip-160-derive): the `Aip160Filter` and
-  `Aip160Jsonb` derive macros, re-exported by the main crate.
+- [`diesel-aip-160-derive`](diesel-aip-160-derive): the `Aip160Filter`,
+  `Aip160Jsonb`, and `Aip160PgEnum` derive macros, re-exported by the main crate.
 
 ## Installation
 
@@ -362,6 +362,12 @@ PostgreSQL. See the [JSONB tests](diesel-aip-160/tests/derive.rs) for a complete
 schema and query examples.
 
 ## Custom fields and PostgreSQL enums
+
+For local wrappers around dependency enums, derive
+[`Aip160PgEnum`](diesel-aip-160-derive/README.md#aip160pgenum) to generate
+PostgreSQL `FromSql`/`ToSql` implementations using a label value type and two
+fallible conversion functions. Your application owns the enum mapping and
+validation. Filtering still requires an adapter to choose comparison behavior.
 
 Select an application adapter explicitly; enum labels are never automatically
 interpreted as numbers or compared in numeric order:
