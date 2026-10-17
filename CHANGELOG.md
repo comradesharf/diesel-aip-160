@@ -1,0 +1,78 @@
+# Changelog
+
+Both workspace crates share the versions below. These beta releases may change
+public APIs and filter behavior; pin the exact version when upgrading.
+
+## 0.1.0-beta.4 — 2026-10-17
+
+### Added
+
+- Schema SQL type dispatch for Diesel's built-in column families, aliases, and
+  nullable variants across PostgreSQL, MySQL, and SQLite. This includes booleans,
+  signed/unsigned integers, floats, decimals, binary, temporal values, JSON, and
+  PostgreSQL UUID, network, array, range, multirange, and record types.
+- Optional `chrono`, `time`, `uuid`, `numeric`, `network-address`, and
+  `ipnet-address` integrations, plus the `native-types` feature bundle.
+- `Aip160PgEnum` derive for PostgreSQL enum `FromSql`/`ToSql` implementations on
+  local wrappers, using application-provided fallible label conversions.
+- Native database execution tests, Docker Compose test infrastructure, and
+  `sqlite-integration` (bundled SQLite) and `mysql-integration` features.
+- Documentation of native literal formats, SQL equivalents, precision limits,
+  containment, and backend-specific behavior.
+
+### Changed
+
+- `Aip160Filter` selects built-in handlers from the schema column's SQL type
+  instead of classifying the model's Rust field type.
+- **Breaking:** `Aip160FilterCompiler` now uses
+  `native_compare(field, parser::Comparator, &parser::Value)` for built-in
+  comparisons. `FieldType::Native` replaces the former scalar and JSONB variants;
+  `FilterLiteral` and the separate comparison, LIKE, and JSONB trait methods
+  have been removed. `custom_compare` and `ilike` remain available.
+- Native handlers validate literal spelling, quoting, numeric bounds, NULL,
+  presence, and supported operators. SQLite temporal values use Diesel's storage
+  format and precision when the matching `chrono` or `time` feature is enabled.
+
+### Migration from beta.3
+
+- Update both crates together to `0.1.0-beta.4`; the runtime requires the matching
+  derive version or a compatible newer prerelease.
+- Custom compiler implementations must return `FieldType::Native` for built-in
+  fields and move literal validation and comparison behavior into
+  `native_compare`. It receives the original literal text and quoting, and the
+  parser comparator preserves `:`. Implement `ilike` for global search.
+- Models using `Aip160Filter` gain SQL type dispatch automatically. Keep
+  `#[aip160(adapter = ...)]` for application-defined SQL types and enums, or use
+  `#[aip160(skip)]` to exclude fields. `Aip160PgEnum` generates storage codecs;
+  filter literal mappings and ordering still require an adapter.
+- Enable the matching representation feature for SQLite temporal filtering.
+  Review the README's literal-format table before adopting new native types.
+- Select one backend at a time; backend features remain mutually exclusive.
+
+## 0.1.0-beta.3 — 2026-10-17
+
+- Added explicit `#[aip160(adapter = ...)]` custom field adapters for
+  application-defined SQL types, including PostgreSQL enums.
+- Added signed 64-bit and nullable integer comparisons, with checked literal
+  conversion and NULL/presence handling.
+- Added PostgreSQL enum examples with application-owned numeric label ordering
+  and protobuf mappings, plus opt-in database execution coverage.
+- Added `postgres-integration` to enable native PostgreSQL connections while
+  keeping `postgres` usable for SQL generation without libpq.
+
+## 0.1.0-beta.2 — 2026-10-15
+
+- Changed text `:` and global substring search to case-insensitive matching via
+  `LOWER(column) LIKE LOWER(pattern)`, preserving SQL NULL semantics and escaping
+  LIKE metacharacters.
+- **Breaking:** custom `Aip160FilterCompiler` implementations must supply
+  `ilike`. Wildcard equality continues to use case-sensitive LIKE behavior
+  subject to database collation.
+
+## 0.1.0-beta.1 — 2026-10-06
+
+- Initial beta parser and generic compiler for AIP-160 filters, typed and
+  parameterized Diesel predicates, and SQLite, MySQL, and PostgreSQL examples.
+- Added `Aip160Filter` and `Aip160Jsonb` derives, PostgreSQL JSONB paths, and
+  Serde field rename mappings.
+- Declared Rust 1.99 and the MIT license.

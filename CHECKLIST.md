@@ -70,8 +70,9 @@ add regression coverage when completing an item.
   needs dependency and backend checks on the proposed minimum version.
 - [ ] Verify actual package archives before release, publishing the derive crate
   before the runtime crate so its versioned dependency can resolve. Package
-  listing has been checked; archive compilation has not.
-- [ ] Add a changelog covering beta API changes and migration guidance.
+  archive compilation passed for the beta.4 derive crate. Runtime packaging
+  awaits availability of that derive version on crates.io; see RELEASE.md.
+- [x] Add a changelog covering beta API changes and migration guidance.
 
 ## Optional language extensions
 
