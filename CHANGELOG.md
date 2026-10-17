@@ -3,6 +3,33 @@
 Both workspace crates share the versions below. These beta releases may change
 public APIs and filter behavior; pin the exact version when upgrading.
 
+## 0.1.0-beta.5 — 2026-10-18
+
+### Added
+
+- Automatic PostgreSQL enum filtering for wrappers deriving `Aip160PgEnum`,
+  including nullable fields, aliases, and qualified wrapper paths. Labels use
+  the wrapper's fallible decoder and are bound as the enum SQL type.
+- Enum comparison and database execution coverage, including PostgreSQL
+  declaration ordering, nullable values, invalid labels, and adapter overrides.
+
+### Fixed
+
+- Unrelated Diesel attribute options no longer hide `table_name`, and unrelated
+  Serde options no longer hide JSONB field renames or `rename_all` validation.
+- Duplicate `table_name` options now produce a derive error.
+
+### Migration from beta.4
+
+- Update both crates together to `0.1.0-beta.5`; generated enum filtering code
+  requires the matching runtime helpers.
+- Remove enum field adapters when the wrapper's label conversion and PostgreSQL
+  declaration ordering match the intended filter behavior. Both quoted and
+  unquoted labels are accepted; nullable fields support `=null`, `!=null`, and
+  `:*`. Enum fields are excluded from global text search.
+- Keep explicit adapters for alternate literal mappings or numeric ordering.
+  Numeric enum labels still sort in PostgreSQL declaration order by default.
+
 ## 0.1.0-beta.4 — 2026-10-17
 
 ### Added
