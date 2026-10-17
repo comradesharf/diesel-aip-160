@@ -27,6 +27,10 @@ pub use serde_json;
 
 /// Split a JSONB field name into a column-relative path. The caller supplies
 /// only column names explicitly registered by the derive macro.
+#[diagnostic::on_unimplemented(
+    message = "unsupported Aip160Filter field type `{Self}`",
+    label = "use #[aip160(adapter = MyAdapter)] for custom fields, #[aip160(skip)] to exclude it, or derive Aip160Jsonb for a JSONB field"
+)]
 pub trait JsonbPath {
     fn stored_key(field: &str) -> Option<&str>;
 }

@@ -1,4 +1,4 @@
-//! Reusable PostgreSQL Diesel predicates for filter adapters.
+//! Reusable typed Diesel predicates and application field adapters.
 
 use anyhow::{Result, bail, ensure};
 #[cfg(feature = "postgres")]
@@ -11,7 +11,7 @@ use diesel::pg::Pg as Backend;
 use diesel::prelude::*;
 #[cfg(feature = "postgres")]
 use diesel::sql_types::Jsonb;
-use diesel::sql_types::{Bool, Integer, IntoNullable, Nullable, SqlType, Text};
+use diesel::sql_types::{BigInt, Bool, Integer, IntoNullable, Nullable, SqlType, Text};
 #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mysql"))))]
 use diesel::sqlite::Sqlite as Backend;
 use diesel::{BoxableExpression, Column};
@@ -25,6 +25,19 @@ diesel::define_sql_function! {
 }
 
 pub type Predicate<Table> = Box<dyn BoxableExpression<Table, Backend, SqlType = Bool>>;
+
+/// Application-owned field adapter selected with `#[aip160(adapter = MyAdapter)]`.
+/// Validate accepted literals and map them before constructing typed Diesel expressions.
+/// Bind all values; any SQL fragments must be trusted application constants.
+/// Unquoted `null` and `:*` on nullable fields are dispatched as null comparisons.
+/// Implementations must preserve SQL NULL semantics (avoid COALESCE).
+pub trait FieldAdapter<C: Column> {
+    fn compare(
+        column: C,
+        operator: ComparisonOperator,
+        value: &crate::parser::Value,
+    ) -> Result<Predicate<C::Table>>;
+}
 
 /// Extract a JSONB value by a bound path. PostgreSQL returns SQL NULL for a
 /// missing path, distinct from a present JSON null.
@@ -161,6 +174,55 @@ where
     C: Column + 'static,
     C::SqlType: IntegerSqlType,
     diesel::dsl::Nullable<C>: BoxableExpression<C::Table, Backend, SqlType = Nullable<Integer>>
+        + ValidGrouping<(), IsAggregate = No>,
+{
+    if value.is_none() {
+        ensure!(C::SqlType::NULLABLE, "field `{}` is not nullable", C::NAME);
+    }
+    let column = column.nullable();
+    Ok(match value {
+        Some(value) => match operator {
+            ComparisonOperator::Equal => Box::new(column.eq(value).assume_not_null()),
+            ComparisonOperator::NotEqual => Box::new(column.ne(value).assume_not_null()),
+            ComparisonOperator::GreaterThan => Box::new(column.gt(value).assume_not_null()),
+            ComparisonOperator::GreaterThanOrEqual => Box::new(column.ge(value).assume_not_null()),
+            ComparisonOperator::LessThan => Box::new(column.lt(value).assume_not_null()),
+            ComparisonOperator::LessThanOrEqual => Box::new(column.le(value).assume_not_null()),
+        },
+        None => match operator {
+            ComparisonOperator::Equal => Box::new(column.is_null()),
+            ComparisonOperator::NotEqual => Box::new(column.is_not_null()),
+            _ => bail!("null supports only = and != comparisons"),
+        },
+    })
+}
+
+/// Restricts integer comparisons to BIGINT (i64) columns,
+/// preserving schema nullability.
+pub trait BigIntSqlType: SqlType + IntoNullable<Nullable = Nullable<BigInt>> {
+    const NULLABLE: bool;
+}
+
+impl BigIntSqlType for BigInt {
+    const NULLABLE: bool = false;
+}
+
+impl BigIntSqlType for Nullable<BigInt> {
+    const NULLABLE: bool = true;
+}
+
+/// Compare `BigInt` or `Nullable<BigInt>` columns using bound `i64` values.
+/// `None` supports only equality/inequality on nullable columns and emits
+/// IS NULL / IS NOT NULL. Other comparisons preserve SQL NULL semantics.
+pub fn compare_bigint_column<C>(
+    column: C,
+    operator: ComparisonOperator,
+    value: Option<i64>,
+) -> Result<Predicate<C::Table>>
+where
+    C: Column + 'static,
+    C::SqlType: BigIntSqlType,
+    diesel::dsl::Nullable<C>: BoxableExpression<C::Table, Backend, SqlType = Nullable<BigInt>>
         + ValidGrouping<(), IsAggregate = No>,
 {
     if value.is_none() {

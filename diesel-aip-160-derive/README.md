@@ -60,3 +60,13 @@ the Rust field name; unknown fields return `None`. Struct-level
 ```sh
 cargo test -p diesel-aip-160-derive
 ```
+
+
+`Aip160Filter` supports `i32`, `i64`, and their `Option` variants in addition
+to text fields. Use `#[aip160(adapter = path::Adapter)]` for custom fields such
+as PostgreSQL enums; implement the runtime's `FieldAdapter<Column>` trait.
+Adapters validate/map original literals and return typed predicates with bound
+values, choosing numeric or native enum ordering explicitly. `skip` and
+`adapter` cannot be combined. JSONB types still opt in through `JsonbPath` or
+`Aip160Jsonb`. See the runtime's `examples/postgres_enums.rs` for a compiling
+example and live-test instructions.

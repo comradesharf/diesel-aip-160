@@ -95,6 +95,7 @@ dependencies = [
  "downcast-rs",
  "itoa",
  "libsqlite3-sys",
+ "pq-sys",
  "serde_json",
  "sqlite-wasm-rs",
  "time",
@@ -102,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "diesel-aip-160"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.3"
 dependencies = [
  "anyhow",
  "diesel",
@@ -112,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "diesel-aip-160-derive"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -223,6 +224,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libc"
+version = "0.2.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -261,6 +268,17 @@ name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+
+[[package]]
+name = "pq-sys"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "574ddd6a267294433f140b02a726b0640c43cf7c6f717084684aaa3b285aba61"
+dependencies = [
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "proc-macro2"

@@ -8,6 +8,7 @@ use anyhow::{Result, bail, ensure};
 pub enum FilterLiteral {
     String(String),
     Int(i32),
+    Int64(i64),
     Null,
 }
 
@@ -23,8 +24,18 @@ pub enum ComparisonOperator {
 
 #[derive(Clone, Copy, Debug)]
 pub enum FieldType {
-    String { nullable: bool },
+    String {
+        nullable: bool,
+    },
     Int32,
+    NullableInt32,
+    Int64 {
+        nullable: bool,
+    },
+    /// Literal interpretation and predicate construction belong to the adapter.
+    Custom {
+        nullable: bool,
+    },
     Jsonb,
 }
 
@@ -39,6 +50,16 @@ pub trait Aip160FilterCompiler {
         operator: ComparisonOperator,
         value: FilterLiteral,
     ) -> Result<Self::Predicate>;
+    /// Custom fields receive the original spelling and quoting, without text wildcard handling.
+    fn custom_compare(
+        &self,
+        field: &str,
+        operator: ComparisonOperator,
+        value: &Value,
+    ) -> Result<Self::Predicate> {
+        let _ = (operator, value);
+        bail!("custom comparison is not supported for `{field}`")
+    }
     fn constant(&self, value: bool) -> Self::Predicate;
     fn and(&self, left: Self::Predicate, right: Self::Predicate) -> Self::Predicate;
     fn or(&self, left: Self::Predicate, right: Self::Predicate) -> Self::Predicate;
@@ -200,12 +221,32 @@ fn compare<C: Aip160FilterCompiler>(
         // Documented scalar presence extension: NULL is absent; nonnullable
         // scalar columns are always present, including empty strings and zero.
         return match field_type {
-            FieldType::String { nullable: true } => {
+            FieldType::String { nullable: true }
+            | FieldType::NullableInt32
+            | FieldType::Int64 { nullable: true } => {
                 compiler.compare(field, ComparisonOperator::NotEqual, FilterLiteral::Null)
             }
+            FieldType::Custom { nullable: true } => compiler.custom_compare(
+                field,
+                ComparisonOperator::NotEqual,
+                &Value {
+                    text: "null".into(),
+                    quoted: false,
+                },
+            ),
             FieldType::Jsonb => compiler.json_present(field),
             _ => Ok(compiler.constant(true)),
         };
+    }
+    if let FieldType::Custom { nullable } = field_type {
+        if !value.quoted && value.text == "null" {
+            ensure!(nullable, "field `{field}` is not nullable");
+            ensure!(
+                matches!(operator, Comparator::Equal | Comparator::NotEqual),
+                "null supports only = and != comparisons"
+            );
+        }
+        return compiler.custom_compare(field, comparison_operator(operator), value);
     }
     if matches!(field_type, FieldType::Jsonb) {
         let json = if value.quoted {
@@ -259,30 +300,50 @@ fn compare<C: Aip160FilterCompiler>(
                 FilterLiteral::String(value.text.clone())
             }
         }
-        FieldType::Int32 => {
-            ensure!(
-                !value.quoted,
-                "field `{field}` requires an unquoted signed 32-bit integer"
+        FieldType::Int32 | FieldType::NullableInt32 | FieldType::Int64 { .. } => {
+            let nullable = matches!(
+                field_type,
+                FieldType::NullableInt32 | FieldType::Int64 { nullable: true }
             );
-            let number = value.text.parse::<i32>().map_err(|_| {
-                anyhow::anyhow!(
-                    "field `{field}` requires a signed 32-bit integer, received `{}`",
-                    value.text
-                )
-            })?;
-            FilterLiteral::Int(number)
+            let wide = matches!(field_type, FieldType::Int64 { .. });
+            if !value.quoted && value.text == "null" {
+                ensure!(nullable, "field `{field}` is not nullable");
+                ensure!(
+                    matches!(operator, Comparator::Equal | Comparator::NotEqual),
+                    "null supports only = and != comparisons"
+                );
+                FilterLiteral::Null
+            } else {
+                let bits = if wide { 64 } else { 32 };
+                ensure!(
+                    !value.quoted,
+                    "field `{field}` requires an unquoted signed {bits}-bit integer"
+                );
+                let number = value.text.parse::<i64>().map_err(|error| anyhow::anyhow!(
+                    "field `{field}` requires a signed {bits}-bit integer, received `{}`: {error}", value.text))?;
+                if wide {
+                    FilterLiteral::Int64(number)
+                } else {
+                    FilterLiteral::Int(i32::try_from(number).map_err(|_| anyhow::anyhow!(
+                        "field `{field}` requires a signed 32-bit integer, received `{}`: integer overflow", value.text))?)
+                }
+            }
         }
+        FieldType::Custom { .. } => unreachable!(),
         FieldType::Jsonb => unreachable!(),
     };
-    let operator = match operator {
+    compiler.compare(field, comparison_operator(operator), value)
+}
+
+fn comparison_operator(operator: Comparator) -> ComparisonOperator {
+    match operator {
         Comparator::Equal | Comparator::Has => ComparisonOperator::Equal,
         Comparator::NotEqual => ComparisonOperator::NotEqual,
         Comparator::LessThan => ComparisonOperator::LessThan,
         Comparator::LessThanOrEqual => ComparisonOperator::LessThanOrEqual,
         Comparator::GreaterThan => ComparisonOperator::GreaterThan,
         Comparator::GreaterThanOrEqual => ComparisonOperator::GreaterThanOrEqual,
-    };
-    compiler.compare(field, operator, value)
+    }
 }
 
 fn wildcard_pattern(value: &str) -> String {

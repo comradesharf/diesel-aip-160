@@ -30,8 +30,8 @@ cargo run -p diesel-aip-160 --example postgres --features postgres
 ```
 
 `#[derive(Aip160Filter)]` reads `#[diesel(table_name = ...)]`. `String` and
-`Option<String>` fields support text comparisons and global search. `i32`
-fields support integer comparisons. Use `#[aip160(skip)]` on unsupported fields.
+`Option<String>` fields support text comparisons and global search. `i32`, `i64`,
+`Option<i32>`, and `Option<i64>` fields support integer comparisons. Use `#[aip160(skip)]` on unsupported fields.
 The generated `Model::compile_filter(&str)` returns an optional boxed Diesel
 predicate; an empty filter returns `None`.
 
@@ -48,10 +48,27 @@ database; SQLite's built-in `LOWER` converts ASCII only. Equality and wildcard
 equality retain their existing operator and collation behavior. `*` is literal
 in substring searches except for the unquoted presence check. Nullable fields
 accept unquoted `null` with `=` and `!=`, while `field:*` checks presence.
-Integer values must be unquoted signed 32-bit decimals. Values are bound as
+Integer values must be unquoted signed decimals within the field's 32/64-bit
+range. BIGINT accepts `4294967295` exactly. Values are bound as
 parameters.
 
 Run `cargo test --workspace` for parser and compiler tests. Run
 `cargo test -p diesel-aip-160 --features sqlite`, then repeat with `mysql`
 and `postgres`, for backend predicate tests. The Postgres suite also covers
 JSONB.
+
+Custom enum fields opt in with `#[aip160(adapter = MyAdapter)]`. Implement
+`diesel_helpers::FieldAdapter<Column>` to validate/map original `parser::Value`
+literals and return typed, bound Diesel predicates. Ordering is explicit: a
+numeric enum adapter can cast a trusted column expression to BIGINT; a native
+enum comparison instead follows PostgreSQL declaration order. No GTFS mapping
+is built into the library. See the compiling `examples/postgres_enums.rs` for
+route codes, protobuf pickup/drop-off mappings, nullable BIGINT, and adapter NULL
+handling. Run its SQL-generation tests with `--features postgres --all-targets`.
+The optional `postgres-integration` feature enables an ignored live PostgreSQL
+test (native libpq and `AIP160_TEST_DATABASE_URL` required); run with
+`--example postgres_enums postgres_executes -- --ignored`.
+
+Adapters own trusted expressions and must bind all input values, never interpolate
+filter literals or field names into SQL. Unknown custom types need an adapter,
+`Aip160Jsonb`/`JsonbPath` for JSONB, or `#[aip160(skip)]`.
