@@ -20,7 +20,9 @@ mod pg_enum;
 /// takes `&Inner` and returns `Result<ValueType, E>`. Errors must convert to
 /// `Box<dyn std::error::Error + Send + Sync>`. Values use `FromStr`/`Display`
 /// to read/write PostgreSQL enum labels. Enable the runtime's `postgres` feature.
-/// Derive Diesel's `AsExpression` and `FromSqlRow` separately.
+/// Derive Diesel's `AsExpression` and `FromSqlRow` separately. `Aip160Filter`
+/// automatically reuses these conversions for wrapper fields (including `Option`)
+/// without a field adapter. Ordering follows PostgreSQL enum declaration order.
 #[proc_macro_derive(Aip160PgEnum, attributes(aip160, diesel))]
 pub fn derive_aip160_pg_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -159,14 +161,14 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             customs.push(quote!(#name => <#adapter as ::diesel_aip_160::diesel_helpers::FieldAdapter<#column>>::compare(#column, operator, value),));
             continue;
         }
-        types.push(quote!(if let Some(ty) = ::diesel_aip_160::native::field_type::<#column, #ty>(#column, field, #name) { return Ok(ty); }));
-        natives.push(quote!(if ::diesel_aip_160::native::field_type::<#column, #ty>(#column, field, #name).is_some() {
-            return ::diesel_aip_160::native::compare::<#column, #ty>(#column, field, #name, operator, value);
-        }));
-        texts.push(
-            quote!(if ::diesel_aip_160::native::is_text::<#column>() { fields.push(#name); }),
+        types.push(quote!(if let Some(ty) = <#ty>::__aip160_field_type(#column, field, #name) { return Ok(ty); }));
+        natives.push(
+            quote!(if <#ty>::__aip160_field_type(#column, field, #name).is_some() {
+                return <#ty>::__aip160_compare(#column, field, #name, operator, value);
+            }),
         );
-        ilikes.push(quote!(#name => ::diesel_aip_160::native::like(#column, pattern, true),));
+        texts.push(quote!(if <#ty>::__aip160_is_text(#column) { fields.push(#name); }));
+        ilikes.push(quote!(#name => <#ty>::__aip160_like(#column, pattern, true),));
     }
     Ok(quote! {
         impl #model {
@@ -183,18 +185,26 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
             fn native_compare(&self, field: &str, operator: ::diesel_aip_160::parser::Comparator,
                 value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+                #[allow(unused_imports)]
+                use ::diesel_aip_160::native::FilterField as _;
                 #(#natives)*
                 ::diesel_aip_160::anyhow::bail!("unknown filter field `{field}`")
             }
             fn field_type(&self, field: &str) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::compiler::FieldType> {
+                #[allow(unused_imports)]
+                use ::diesel_aip_160::native::FilterField as _;
                 #(#types)*
                 ::diesel_aip_160::anyhow::bail!("unknown filter field `{field}`")
             }
             fn text_fields(&self) -> &'static [&'static str] {
+                #[allow(unused_imports)]
+                use ::diesel_aip_160::native::FilterField as _;
                 static FIELDS: ::std::sync::OnceLock<Vec<&'static str>> = ::std::sync::OnceLock::new();
                 FIELDS.get_or_init(|| { let mut fields = Vec::new(); #(#texts)* fields }).as_slice()
             }
             fn ilike(&self, field: &str, pattern: String) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+                #[allow(unused_imports)]
+                use ::diesel_aip_160::native::FilterField as _;
                 match field { #(#ilikes)* _ => ::diesel_aip_160::anyhow::bail!("unknown string field `{field}`"), }
             }
             fn constant(&self, value: bool) -> Self::Predicate {
@@ -318,10 +328,10 @@ mod tests {
         };
         let output = compact(expand(input).unwrap());
         assert!(output.contains("RecordFilterCompiler"));
-        assert!(output.contains("native::field_type::<records::name,String>"));
-        assert!(output.contains("native::field_type::<records::optional_name,String>"));
-        assert!(output.contains("native::field_type::<records::count,i32>"));
-        assert!(output.contains("native::field_type::<records::details,Details>"));
+        assert!(output.contains("<String>::__aip160_field_type(records::name"));
+        assert!(output.contains("<String>::__aip160_field_type(records::optional_name"));
+        assert!(output.contains("<i32>::__aip160_field_type(records::count"));
+        assert!(output.contains("<Details>::__aip160_field_type(records::details"));
         assert!(!output.contains("\"ignored\""));
     }
 
@@ -338,9 +348,9 @@ mod tests {
             }
         };
         let output = compact(expand(input).unwrap());
-        assert!(output.contains("native::field_type::<records::small,i32>"));
-        assert!(output.contains("native::field_type::<records::large,i64>"));
-        assert!(output.contains("native::field_type::<records::optional,i64>"));
+        assert!(output.contains("<i32>::__aip160_field_type(records::small"));
+        assert!(output.contains("<i64>::__aip160_field_type(records::large"));
+        assert!(output.contains("<i64>::__aip160_field_type(records::optional"));
         assert!(output.contains("FieldAdapter<records::code>"));
         assert!(!output.contains("json_path"));
     }

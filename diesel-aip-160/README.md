@@ -69,9 +69,11 @@ JSONB.
 For PostgreSQL storage conversion of a local wrapper around a dependency enum,
 derive [`Aip160PgEnum`](../diesel-aip-160-derive/README.md#aip160pgenum) with a
 label value type and two fallible conversion functions. It generates
-`FromSql`/`ToSql`; your application supplies the enum mapping and validation.
+`FromSql`/`ToSql` and automatic `Aip160Filter` support for wrapper fields and
+`Option<Wrapper>`, without field attributes. Your application supplies the enum
+mapping and validation; comparisons follow PostgreSQL enum declaration order.
 
-Custom enum fields opt in with `#[aip160(adapter = MyAdapter)]`. Implement
+Other custom fields, or enums needing different filter behavior, opt in with `#[aip160(adapter = MyAdapter)]`. Implement
 `diesel_helpers::FieldAdapter<Column>` to validate/map original `parser::Value`
 literals and return typed, bound Diesel predicates. Ordering is explicit: a
 numeric enum adapter can cast a trusted column expression to BIGINT; a native

@@ -100,10 +100,33 @@ paths such as `RouteType::try_from` directly. The derive cannot infer the
 mapping or validation rules of an external enum. A local wrapper keeps the
 Diesel implementations compatible with Rust's orphan rules.
 
-This generates storage codecs only. For `Aip160Filter`, continue to select a
-`FieldAdapter` to define filter literals and enum ordering. See the
-[compiling codec tests](../diesel-aip-160/tests/pg_enum.rs), including the
-opt-in PostgreSQL round-trip test:
+`Aip160Filter` also picks up these conversions automatically. Use the wrapper
+as a model field without an adapter attribute:
+
+```rust
+#[derive(diesel_aip_160::Aip160Filter)]
+#[diesel(table_name = routes)]
+struct Route {
+    id: i32,
+    route_type: GtfsRouteType,
+    optional_route_type: Option<GtfsRouteType>,
+}
+```
+
+Each schema column must use `RouteTypeEnum` (or `Nullable<RouteTypeEnum>`).
+Type aliases and qualified wrapper paths work too. Filter values are parsed
+as `value_type`, passed through `from_value`, and bound using the wrapper's
+`ToSql` implementation. Both quoted and unquoted labels are accepted.
+Comparisons support `=`, `!=`, `<`, `<=`, `>`, `>=`, and `:` (equality), plus
+`:*` for presence and `=null`/`!=null` on nullable columns. Invalid labels
+fail through the same decoder used for database values. Enum fields are
+excluded from global text search.
+
+Ordering follows **PostgreSQL enum declaration order**, even for numeric labels.
+Use `#[aip160(adapter = MyAdapter)]` on a field when it needs different literal
+mapping or numeric ordering; explicit adapters override automatic filtering.
+See the [compiling model and codec tests](../diesel-aip-160/tests/pg_enum.rs),
+including the opt-in PostgreSQL execution test:
 
 ```sh
 AIP160_TEST_DATABASE_URL=postgres://... cargo test -p diesel-aip-160 \
@@ -119,7 +142,8 @@ cargo test -p diesel-aip-160-derive
 
 `Aip160Filter` supports `i32`, `i64`, and their `Option` variants in addition
 to text fields. Use `#[aip160(adapter = path::Adapter)]` for custom fields such
-as PostgreSQL enums; implement the runtime's `FieldAdapter<Column>` trait.
+that are not covered by `Aip160PgEnum`; implement the runtime's
+`FieldAdapter<Column>` trait.
 Adapters validate/map original literals and return typed predicates with bound
 values, choosing numeric or native enum ordering explicitly. `skip` and
 `adapter` cannot be combined. JSONB types still opt in through `JsonbPath` or

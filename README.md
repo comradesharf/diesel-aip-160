@@ -76,7 +76,8 @@ The derive reads each schema column's Diesel SQL type. All built-in column type
 families are filterable without an adapter, including nullable variants, aliases,
 PostgreSQL arrays/ranges/multiranges/records, MySQL unsigned numbers, and SQLite
 timestamps and JSONB. Exclude fields with `#[aip160(skip)]`. Application-defined
-SQL enums and composite SQL types still use adapters.
+PostgreSQL enum wrappers deriving `Aip160PgEnum` support filtering automatically.
+Other custom SQL types, including composites, use adapters.
 
 ## Native types and literal formats
 
@@ -219,7 +220,7 @@ for optional representation features and backend limitations.
 | JSON (`Json`) | `payload='{"enabled":true}'`, `payload:'{"enabled":true}'` | Quote valid JSON. `=` / `!=` compare values; `:` checks containment on PostgreSQL and MySQL. SQLite rejects containment. |
 | PostgreSQL JSONB (`Jsonb`) | `payload.enabled=true`, `payload.count>=10`, `payload:'{"enabled":true}'` | Dotted paths compare JSON values; `:` checks JSONB containment. Unquoted booleans/numbers stay JSON booleans/numbers; quoted scalar values become JSON strings. |
 | Nullable column (`Nullable<T>`, usually `Option<T>`) | `note=null`, `note!=null`, `note:*` | Unquoted `null` checks SQL NULL; `!=null` and `:*` check for a non-NULL value. Ordinary values follow the underlying type's rules. |
-| Custom SQL type / enum | `route_type=3`, `route_type>=100` | An explicit field adapter defines accepted literals and comparisons; see [custom fields and PostgreSQL enums](#custom-fields-and-postgresql-enums). |
+| Custom SQL type / enum | `route_type=3`, `route_type>=100` | `Aip160PgEnum` wrappers reuse their conversions and PostgreSQL enum ordering; other custom fields use an explicit adapter. See [custom fields and PostgreSQL enums](#custom-fields-and-postgresql-enums). |
 
 Use `=` / `!=` for equality and `<`, `<=`, `>`, `>=` for ordering where the
 type and backend support it. `:` is type-specific: text substring search,
@@ -367,7 +368,10 @@ For local wrappers around dependency enums, derive
 [`Aip160PgEnum`](diesel-aip-160-derive/README.md#aip160pgenum) to generate
 PostgreSQL `FromSql`/`ToSql` implementations using a label value type and two
 fallible conversion functions. Your application owns the enum mapping and
-validation. Filtering still requires an adapter to choose comparison behavior.
+validation. Models using these wrappers (or `Option<Wrapper>`) filter automatically
+without field attributes. Literal values go through the wrapper's decoder and
+are bound as the enum SQL type; ordering follows PostgreSQL declaration order.
+Use a field adapter to override this behavior, for example for numeric ordering.
 
 Select an application adapter explicitly; enum labels are never automatically
 interpreted as numbers or compared in numeric order:

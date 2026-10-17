@@ -305,6 +305,52 @@ impl<T, S: NativeType<T>> NativeType<T> for st::Nullable<S> {
     }
 }
 
+/// Fallback methods used by the filter derive for built-in types. Enum wrappers
+/// supply inherent methods with the same names, selected at each concrete field.
+#[doc(hidden)]
+pub trait FilterField: Sized {
+    fn __aip160_field_type<C: Column>(column: C, field: &str, name: &str) -> Option<FieldType>
+    where
+        C::SqlType: NativeType<Self>,
+    {
+        field_type::<C, Self>(column, field, name)
+    }
+
+    fn __aip160_compare<C>(
+        column: C,
+        field: &str,
+        name: &str,
+        op: Comparator,
+        value: &Value,
+    ) -> Result<Predicate<C::Table>>
+    where
+        C: Column + QueryFragment<Backend> + Send + 'static,
+        C::SqlType: NativeType<Self>,
+    {
+        compare::<C, Self>(column, field, name, op, value)
+    }
+
+    fn __aip160_is_text<C: Column>(_: C) -> bool
+    where
+        C::SqlType: NativeSqlType,
+    {
+        is_text::<C>()
+    }
+
+    fn __aip160_like<C>(
+        column: C,
+        pattern: String,
+        insensitive: bool,
+    ) -> Result<Predicate<C::Table>>
+    where
+        C: Column + QueryFragment<Backend> + Send + 'static,
+        C::SqlType: NativeSqlType,
+    {
+        like(column, pattern, insensitive)
+    }
+}
+impl<T> FilterField for T {}
+
 #[doc(hidden)]
 pub fn field_type<C: Column, T>(_: C, field: &str, column: &str) -> Option<FieldType>
 where
