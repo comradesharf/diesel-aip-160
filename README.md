@@ -3,7 +3,7 @@
 Parse AIP-160 filter strings, validate them against model fields, and compile
 them into typed, parameterized Diesel predicates.
 
-**Status: beta (`0.1.0-beta.4`).** Both crates share this prerelease version.
+**Status: beta (`0.1.0-beta.5`).** Both crates share this prerelease version.
 The public API and filter behavior may change between beta releases. Pin the
 exact version for reproducible integrations and review changes before upgrading.
 
@@ -19,7 +19,7 @@ Enable one database backend:
 
 ```toml
 [dependencies]
-diesel-aip-160 = { version = "=0.1.0-beta.4", features = ["sqlite"] }
+diesel-aip-160 = { version = "=0.1.0-beta.5", features = ["sqlite"] }
 diesel = { version = "2", default-features = false, features = ["sqlite"] }
 ```
 
@@ -84,7 +84,7 @@ Other custom SQL types, including composites, use adapters.
 Enable optional Rust representation integrations as needed:
 
 ```toml
-diesel-aip-160 = { version = "=0.1.0-beta.4", features = ["postgres", "chrono", "uuid", "numeric", "ipnet-address"] }
+diesel-aip-160 = { version = "=0.1.0-beta.5", features = ["postgres", "chrono", "uuid", "numeric", "ipnet-address"] }
 ```
 
 `chrono`, `time`, `uuid`, `numeric` (BigDecimal), `ipnet-address`, and

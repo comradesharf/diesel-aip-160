@@ -1,4 +1,4 @@
-# Releasing 0.1.0-beta.4
+# Releasing 0.1.0-beta.5
 
 Release notes and migration guidance are in [CHANGELOG.md](CHANGELOG.md).
 Both crates use the workspace version; publish the derive crate first so the
@@ -18,7 +18,8 @@ cargo test -p diesel-aip-160 --locked --all-targets --features postgres,native-t
 ./scripts/test-native-types.sh
 ```
 
-The final command requires Docker and executes the native database tests.
+The final command requires Docker and executes the native database tests
+using the Rust 1.99.1 container toolchain.
 Review any ignored tests separately; ordinary Cargo tests do not execute them.
 
 ## Package and publish
@@ -37,22 +38,26 @@ cargo publish -p diesel-aip-160 --locked
 After both versions are published, tag the release commit and push the tag:
 
 ```sh
-git tag -a v0.1.0-beta.4 -m 'Release 0.1.0-beta.4'
-git push origin v0.1.0-beta.4
+git tag -a v0.1.0-beta.5 -m 'Release 0.1.0-beta.5'
+git push origin v0.1.0-beta.5
 ```
 
-Use the beta.4 changelog section as the release description. Package dry runs,
+Use the beta.5 changelog section as the release description. Package dry runs,
 publication, and tagging are separate steps; preparing these files does not
 publish a release.
 
-## Preparation checks (2026-10-17)
+## Preparation checks (2026-10-18)
 
-- Formatting and workspace tests passed with the locked dependencies offline.
+- Formatting and workspace tests passed with the locked dependencies offline
+  using Rust 1.99.0.
 - All-target tests passed separately for SQLite, MySQL, and PostgreSQL with
-  `native-types`, including SQLite database execution and temporal precision
-  tests. PostgreSQL/MySQL database execution and the Docker suite were not run.
+  `native-types`, including enum SQL generation and SQLite database execution
+  and temporal precision tests.
+- `./scripts/test-native-types.sh` passed using Rust 1.99.1 in Docker, including
+  PostgreSQL/MySQL database execution, the ignored PostgreSQL enum tests, and
+  bundled SQLite execution.
 - `cargo package -p diesel-aip-160-derive --locked --offline --allow-dirty`
-  built and verified the derive archive successfully.
+  built and verified the beta.5 derive archive successfully.
 - Runtime packaging was attempted offline and could not resolve
-  `diesel-aip-160-derive ^0.1.0-beta.4` from the local crates.io index. Repeat
+  `diesel-aip-160-derive ^0.1.0-beta.5` from the local crates.io index. Repeat
   its dry run after publishing the derive crate.

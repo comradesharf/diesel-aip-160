@@ -1,6 +1,6 @@
 # diesel-aip-160
 
-**Status: beta (`0.1.0-beta.4`).** The public API and filter behavior may change
+**Status: beta (`0.1.0-beta.5`).** The public API and filter behavior may change
 between beta releases. Pin the exact version and review changes before upgrading.
 
 AIP-160 filter parser and Diesel predicate derive. The parser and compiler work
@@ -9,7 +9,7 @@ without a database driver. Enable exactly one backend feature to use
 
 ```toml
 [dependencies]
-diesel-aip-160 = { version = "=0.1.0-beta.4", features = ["sqlite"] }
+diesel-aip-160 = { version = "=0.1.0-beta.5", features = ["sqlite"] }
 ```
 
 The available features are `sqlite`, `mysql`, and `postgres`. None is enabled
