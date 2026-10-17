@@ -72,10 +72,67 @@ Values are bound as SQL parameters. An empty or whitespace-only filter returns
 `Ok(None)`, so the query can omit `.filter(...)`. Invalid syntax, unknown fields,
 and incompatible values return an error.
 
-The derive supports `String`, `Option<String>`, `i32`, `Option<i32>`, `i64`,
-and `Option<i64>` fields. Exclude fields
-that should not be filterable with `#[aip160(skip)]`. PostgreSQL also supports
-JSONB fields, described below.
+The derive reads each schema column's Diesel SQL type. All built-in column type
+families are filterable without an adapter, including nullable variants, aliases,
+PostgreSQL arrays/ranges/multiranges/records, MySQL unsigned numbers, and SQLite
+timestamps and JSONB. Exclude fields with `#[aip160(skip)]`. Application-defined
+SQL enums and composite SQL types still use adapters.
+
+## Native types and literal formats
+
+Enable optional Rust representation integrations as needed:
+
+```toml
+diesel-aip-160 = { version = "=0.1.0-beta.3", features = ["postgres", "chrono", "uuid", "numeric", "ipnet-address"] }
+```
+
+`chrono`, `time`, `uuid`, `numeric` (BigDecimal), `ipnet-address`, and
+`network-address` (ipnetwork) forward to Diesel's corresponding integrations.
+`native-types` enables all of these except the alternative `network-address`.
+No representation dependency is enabled by default. Schema type dispatch also
+works when your application already enables a representation through Diesel.
+For SQLite temporal models, enable the matching `chrono` or `time` feature
+on this crate so literals match Diesel's storage format and UTC conversion.
+SQLite temporal comparisons preserve the precision of Diesel's serializer
+without conversion through SQLite date functions.
+Temporal validation uses `chrono` or `time` when enabled; otherwise the database
+validates temporal literals.
+
+| SQL family | Filter example | Behavior |
+| --- | --- | --- |
+| Boolean | `enabled=true` | Unquoted `true` / `false`; native ordering |
+| Signed/unsigned integers | `code=65535` | Unquoted, checked against the SQL type's bit width |
+| Float/double | `score>=1.25e-3` | Unquoted finite values within the target type's range |
+| Numeric/decimal | `amount=12345678901234567890.123456789` | Exact decimal parsing; no float conversion on PostgreSQL/MySQL |
+| Binary | `bytes="0xdeadbeef"` | Quoted even-length hexadecimal, including empty `0x` |
+| Date/time/timestamp | `created_at>="2026-10-17T12:34:56"` | Quoted ISO values; timezone-aware types use RFC 3339 offsets |
+| UUID/network/MAC/WAL position | `network="192.168.1.0/24"` | Quoted canonical strings |
+| PostgreSQL interval/money | `duration="1 day 2 hours"` | Quoted native strings; database validates format |
+| PostgreSQL array | `tags:"{rust,diesel}"` | Quoted PostgreSQL array literal; `:` means contains |
+| PostgreSQL range | `window:"[1,10)"` | Quoted native range literal; `:` means contains |
+| PostgreSQL multirange | `windows:"{[1,10),[20,30)}"` | Quoted native multirange literal; `:` means contains |
+| PostgreSQL record | `pair='(7,"seven")'` | Typed row comparison; empty unquoted record fields represent NULL |
+| JSON | `payload='{"enabled":true}'` | Validated JSON; equality, inequality, and backend-supported containment |
+| PostgreSQL `Citext` | `name=alice` | Database case-insensitive comparisons and text search |
+| PostgreSQL internal `CChar` | `flag="a"` | One quoted byte or an unquoted unsigned 8-bit integer |
+
+Comparisons use database-native ordering. Unsupported operators return an error.
+PostgreSQL `Json` comparisons convert to JSONB; MySQL JSON containment uses
+`JSON_CONTAINS`. SQLite JSON/JSONB equality compares `json(...)` text, so object
+key order remains significant; SQLite JSON containment is rejected. PostgreSQL
+JSONB retains dotted paths and structured Rust key mappings described below.
+
+Unquoted `null` checks SQL NULL for nullable native columns; `:*` checks presence.
+For PostgreSQL JSONB, dotted `=null` compares JSON null, while dotted `:*` checks
+path existence. Root nullable JSONB `=null` checks SQL NULL. Nonnullable JSONB
+retains its existing `=null` JSON-null comparison.
+
+PostgreSQL complex literals are bound as text and cast to trusted built-in SQL
+types. Their complete format validation happens when executing the query.
+Record elements are individually bound and typed. MySQL decimals use a cast
+with a scale derived from the literal (maximum 65 digits and 30 fractional
+places); values outside those native limits are rejected. SQLite numeric
+precision follows SQLite's floating-point storage behavior.
 
 ## Filter syntax
 
@@ -228,9 +285,8 @@ For example, a numeric adapter is inappropriate for enums with nonnumeric
 stored labels. The library contains no GTFS mappings or enum ordering policy.
 
 Existing JSONB structs continue to opt in with `Aip160Jsonb`/`JsonbPath` (and
-`serde_json::Value` remains supported). Unknown custom types produce an
-unsupported-field diagnostic pointing to `adapter`, `skip`, or `Aip160Jsonb`;
-unsupported primitive fields are rejected directly by the derive.
+`serde_json::Value` remains supported). Unknown custom SQL types require an
+adapter or `skip`; built-in SQL types dispatch directly from the schema.
 
 Run the enum SQL-generation tests without a database:
 
@@ -278,6 +334,25 @@ default implementations that return unsupported-operation errors.
 
 ## Run examples and tests
 
+For local database development, start PostgreSQL and MySQL with Docker Compose:
+
+```sh
+docker compose up -d --wait
+```
+
+Both databases use database name, username, and password `aip160`. They are
+available only on localhost with these connection URLs:
+
+- PostgreSQL: `postgres://aip160:aip160@localhost:5432/aip160`
+- MySQL: `mysql://aip160:aip160@localhost:3306/aip160`
+
+These credentials are for local development. Data persists in named Docker
+volumes across `docker compose down`. To delete the database data as well, run
+`docker compose down -v`.
+
+Use the PostgreSQL URL as `AIP160_TEST_DATABASE_URL` for the optional integration
+test above.
+
 The included examples print SQL and do not require a running database:
 
 ```sh
@@ -285,6 +360,20 @@ cargo run -p diesel-aip-160 --example sqlite --features sqlite
 cargo run -p diesel-aip-160 --example mysql --features mysql
 cargo run -p diesel-aip-160 --example postgres --features postgres
 ```
+
+Run the complete native-type suite through the existing Docker Compose databases:
+
+```sh
+./scripts/test-native-types.sh
+```
+
+The script builds `Dockerfile.test`, starts healthy databases, and runs all tests
+separately for PostgreSQL, MySQL, and SQLite using `compose.test.yaml`. The tests
+execute bound Diesel queries against real databases, checking every native type
+family, nullable values, precision boundaries, and containment. SQLite runs
+inside the test container using an in-memory database and bundled SQLite
+(`sqlite-integration`), including JSONB support (SQLite 3.45 or newer). Test containers are
+removed after each run; database and build-cache volumes persist.
 
 Run tests separately for each backend because backend features are mutually
 exclusive:

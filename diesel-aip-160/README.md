@@ -29,11 +29,20 @@ cargo run -p diesel-aip-160 --example mysql --features mysql
 cargo run -p diesel-aip-160 --example postgres --features postgres
 ```
 
-`#[derive(Aip160Filter)]` reads `#[diesel(table_name = ...)]`. `String` and
-`Option<String>` fields support text comparisons and global search. `i32`, `i64`,
-`Option<i32>`, and `Option<i64>` fields support integer comparisons. Use `#[aip160(skip)]` on unsupported fields.
-The generated `Model::compile_filter(&str)` returns an optional boxed Diesel
-predicate; an empty filter returns `None`.
+`#[derive(Aip160Filter)]` reads `#[diesel(table_name = ...)]` and dispatches
+from each column's SQL type. All Diesel built-in column families and nullable
+variants are supported without adapters. Text fields support global search.
+Use `#[aip160(skip)]` to exclude fields. The generated
+`Model::compile_filter(&str)` returns an optional boxed predicate; empty input
+returns `None`.
+
+Optional `chrono`, `time`, `uuid`, `numeric`, `ipnet-address`, and
+`network-address` features enable Diesel representation integrations.
+`native-types` enables all except the alternative `network-address`.
+See the [workspace README](../README.md#native-types-and-literal-formats) for
+literal formats, operators, backend differences, and validation boundaries.
+Run `../scripts/test-native-types.sh` from this crate to execute the full
+PostgreSQL/MySQL/SQLite suite through Docker Compose.
 
 Postgres additionally supports JSONB columns. Derive `Aip160Jsonb` on a JSONB
 struct to map Rust field names and `#[serde(rename = "...")]` attributes to
@@ -72,3 +81,13 @@ test (native libpq and `AIP160_TEST_DATABASE_URL` required); run with
 Adapters own trusted expressions and must bind all input values, never interpolate
 filter literals or field names into SQL. Unknown custom types need an adapter,
 `Aip160Jsonb`/`JsonbPath` for JSONB, or `#[aip160(skip)]`.
+
+The compiler dispatches every built-in Diesel SQL type through `FieldType::Native`
+and application adapters through `FieldType::Custom { nullable }`. Native handlers
+receive `parser::Comparator` and the original `parser::Value`, and own scalar
+validation, text patterns, JSON traversal, and backend SQL construction.
+Manual `Aip160FilterCompiler` implementations must implement `native_compare`;
+the former `compare`/`FilterLiteral`, scalar `FieldType` variants, `like`, and
+JSON-specific compiler hooks have been removed. The obsolete scalar/JSON
+helpers in `diesel_helpers` have also been removed; use native filtering or
+construct typed Diesel expressions in a `FieldAdapter`.

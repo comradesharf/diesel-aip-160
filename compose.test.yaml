@@ -1,0 +1,34 @@
+x-tests: &tests
+  build:
+    context: .
+    dockerfile: Dockerfile.test
+  profiles: [test]
+  volumes:
+    - .:/workspace:ro
+    - test_target:/build
+    - test_registry:/usr/local/cargo/registry
+  environment:
+    RUSTUP_TOOLCHAIN: 1.99.1
+    AIP160_TEST_DATABASE_URL: postgres://aip160:aip160@postgres:5432/aip160
+    AIP160_MYSQL_DATABASE_URL: mysql://aip160:aip160@mysql:3306/aip160
+
+services:
+  test-postgres:
+    <<: *tests
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: cargo test --locked --workspace --all-targets --features postgres-integration,native-types -- --include-ignored
+  test-mysql:
+    <<: *tests
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: cargo test --locked --workspace --all-targets --features mysql-integration,native-types -- --include-ignored
+  test-sqlite:
+    <<: *tests
+    command: cargo test --locked --workspace --all-targets --features sqlite-integration,native-types
+
+volumes:
+  test_target:
+  test_registry:

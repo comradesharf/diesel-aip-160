@@ -17,6 +17,8 @@
 pub mod compiler;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub mod diesel_helpers;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
+pub mod native;
 pub mod parser;
 
 pub use anyhow;

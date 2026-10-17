@@ -31,9 +31,12 @@ is not required. It generates `RecordFilterCompiler` and
 `Record::compile_filter(&str)`, returning an `anyhow::Result` containing an
 optional boxed Diesel predicate. An empty filter returns `None`.
 
-`String`, `Option<String>`, and `i32` fields support filtering. Exclude
-unsupported fields with `#[aip160(skip)]`. PostgreSQL also supports JSONB
-fields through `diesel_aip_160::JsonbPath`; other backends reject those fields.
+The macro dispatches from the schema column's SQL type rather than the Rust
+field name. All Diesel built-in column families, aliases, and nullable variants
+support filtering. Exclude fields with `#[aip160(skip)]`. PostgreSQL JSONB
+traversal uses `diesel_aip_160::JsonbPath`; `serde_json::Value` supports arbitrary
+keys automatically. SQLite JSONB supports root comparisons. See the
+[workspace README](../README.md#native-types-and-literal-formats) for formats.
 
 ## `Aip160Jsonb`
 
