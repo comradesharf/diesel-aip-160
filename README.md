@@ -76,7 +76,8 @@ The derive reads each schema column's Diesel SQL type. All built-in column type
 families are filterable without an adapter, including nullable variants, aliases,
 PostgreSQL arrays/ranges/multiranges/records, MySQL unsigned numbers, and SQLite
 timestamps and JSONB. Exclude fields with `#[aip160(skip)]`. Application-defined
-SQL enums and composite SQL types still use adapters.
+PostgreSQL enum wrappers deriving `Aip160PgEnum` support filtering automatically.
+Other custom SQL types, including composites, use adapters.
 
 ## Native types and literal formats
 
@@ -219,7 +220,7 @@ for optional representation features and backend limitations.
 | JSON (`Json`) | `payload='{"enabled":true}'`, `payload:'{"enabled":true}'` | Quote valid JSON. `=` / `!=` compare values; `:` checks containment on PostgreSQL and MySQL. SQLite rejects containment. |
 | PostgreSQL JSONB (`Jsonb`) | `payload.enabled=true`, `payload.count>=10`, `payload:'{"enabled":true}'` | Dotted paths compare JSON values; `:` checks JSONB containment. Unquoted booleans/numbers stay JSON booleans/numbers; quoted scalar values become JSON strings. |
 | Nullable column (`Nullable<T>`, usually `Option<T>`) | `note=null`, `note!=null`, `note:*` | Unquoted `null` checks SQL NULL; `!=null` and `:*` check for a non-NULL value. Ordinary values follow the underlying type's rules. |
-| Custom SQL type / enum | `route_type=3`, `route_type>=100` | An explicit field adapter defines accepted literals and comparisons; see [custom fields and PostgreSQL enums](#custom-fields-and-postgresql-enums). |
+| Custom SQL type / enum | `route_type=3`, `route_type>=100` | `Aip160PgEnum` wrappers reuse their conversions and PostgreSQL enum ordering; other custom fields use an explicit adapter. See [custom fields and PostgreSQL enums](#custom-fields-and-postgresql-enums). |
 
 Use `=` / `!=` for equality and `<`, `<=`, `>`, `>=` for ordering where the
 type and backend support it. `:` is type-specific: text substring search,
@@ -367,10 +368,14 @@ For local wrappers around dependency enums, derive
 [`Aip160PgEnum`](diesel-aip-160-derive/README.md#aip160pgenum) to generate
 PostgreSQL `FromSql`/`ToSql` implementations using a label value type and two
 fallible conversion functions. Your application owns the enum mapping and
-validation. Filtering still requires an adapter to choose comparison behavior.
+validation. Models using these wrappers (or `Option<Wrapper>`) filter automatically
+without field attributes. Literal values go through the wrapper's decoder and
+are bound as the enum SQL type; ordering follows PostgreSQL declaration order.
+Use a field adapter to override this behavior, for example for numeric ordering.
 
-Select an application adapter explicitly; enum labels are never automatically
-interpreted as numbers or compared in numeric order:
+Select an application adapter explicitly for numeric ordering. Parsing a label
+as a numeric `value_type` validates its code but does not change PostgreSQL's
+comparison order:
 
 ```rust,ignore
 #[derive(Aip160Filter)]
@@ -401,13 +406,33 @@ remains an ordinary adapter literal. Compare nullable values with Diesel's
 without changing SQL NULL semantics.
 
 The complete, compiling [PostgreSQL enum example](diesel-aip-160/examples/postgres_enums.rs)
-shows numeric route labels `3`, `100`, `1702`, nullable BIGINT `order`, and
-application mappings from protobuf pickup/drop-off literals `1`–`4` to stored
+shows `Aip160PgEnum` codecs and automatic filtering of stored GTFS labels in
+`NativeRoute`. Its `Route` model overrides filtering with numeric route ordering
+for labels `3`, `100`, `1702`, nullable BIGINT `order`, and application mappings
+from protobuf pickup/drop-off literals `1`–`4` to stored
 GTFS labels `0`–`3`. The numeric adapter explicitly casts enum → text → BIGINT
 using a fixed application SQL expression, so `3 < 100 < 1702` regardless of
 PostgreSQL enum declaration order. The pickup adapter binds a value of the
 custom PostgreSQL SQL type and deliberately rejects ordering. For declaration
 ordering instead, an adapter can use typed enum `.lt()`/`.gt()` expressions.
+
+With the test declaration `('1702', '3', '100')`, the two models differ:
+
+| Filter | `NativeRoute` (stored labels) | `Route` (application adapters) |
+| --- | --- | --- |
+| `route_type<100` | Matches labels `1702` and `3` | Matches only label `3` |
+| `route_type='3'` | Accepts the quoted label | Rejects quoted numeric codes |
+| `continuous_pickup=1` | Matches stored label `1` | Matches stored label `0` |
+| `continuous_pickup>1` | Uses PostgreSQL enum order | Rejects ordering |
+| `continuous_drop_off=null` | Checks `IS NULL` | Checks `IS NULL` |
+| `continuous_drop_off:*` | Checks `IS NOT NULL` | Checks `IS NOT NULL` |
+
+Native enum filtering supports all six comparison operators and `:` as equality,
+accepting quoted or unquoted labels through the codec. The example's adapters
+require unquoted codes: `NumericRoute` accepts only `3`, `100`, and `1702`, and
+`ProtobufPickup` accepts only `1` through `4`. Quoted `null` fails validation
+in both models. Ordinary comparisons retain SQL NULL semantics under `NOT`;
+for example, `NOT continuous_drop_off=1` does not select NULL rows.
 
 All values must be bound parameters. Never concatenate user literals, labels,
 paths, or field names into SQL. Adapter SQL expressions are trusted application
@@ -422,12 +447,13 @@ adapter or `skip`; built-in SQL types dispatch directly from the schema.
 Run the enum SQL-generation tests without a database:
 
 ```sh
-cargo test -p diesel-aip-160 --features postgres --all-targets
+cargo test -p diesel-aip-160 --features postgres --example postgres_enums
 cargo run -p diesel-aip-160 --features postgres --example postgres_enums
 ```
 
 An optional ignored integration test executes Diesel queries against PostgreSQL
-with deliberately reordered enum declarations. It creates session-local types
+with deliberately reordered enum declarations. The Rust schema declarations do
+not create database objects. The test creates session-local types
 and a temporary table only. It requires native libpq and an explicitly selected
 test database:
 

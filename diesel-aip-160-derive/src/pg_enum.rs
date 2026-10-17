@@ -26,9 +26,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     for attribute in &input.attrs {
         if attribute.path().is_ident("diesel") {
             // Other Diesel derives can share this attribute (e.g. not_sized).
-            let entries = attribute.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-            )?;
+            let entries = crate::attributes::options(attribute)?;
             for entry in entries {
                 if entry.path().is_ident("sql_type") {
                     let syn::Meta::NameValue(entry) = entry else {
@@ -77,15 +75,64 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let model = &input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {
+        impl #impl_generics #model #type_generics #where_clause {
+            #[doc(hidden)]
+            pub fn __aip160_from_label(text: &str) -> ::diesel_aip_160::diesel::deserialize::Result<Self> {
+                let value = text.parse::<#value_type>()?;
+                let inner: #inner = #from_value(value)?;
+                Ok(Self(inner))
+            }
+
+            #[doc(hidden)]
+            pub fn __aip160_field_type<__Aip160Column>(column: __Aip160Column, field: &str, name: &str)
+                -> Option<::diesel_aip_160::compiler::FieldType>
+            where
+                __Aip160Column: ::diesel_aip_160::diesel::Column,
+                __Aip160Column::SqlType: ::diesel_aip_160::pg_enum::EnumSqlType<#sql_type>,
+            {
+                ::diesel_aip_160::pg_enum::field_type::<__Aip160Column, #sql_type>(column, field, name)
+            }
+
+            #[doc(hidden)]
+            pub fn __aip160_compare<__Aip160Column>(
+                column: __Aip160Column, field: &str, name: &str,
+                operator: ::diesel_aip_160::parser::Comparator,
+                value: &::diesel_aip_160::parser::Value,
+            ) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::diesel_helpers::Predicate<__Aip160Column::Table>>
+            where
+                __Aip160Column: ::diesel_aip_160::diesel::Column
+                    + ::diesel_aip_160::diesel::query_builder::QueryFragment<::diesel_aip_160::diesel::pg::Pg>
+                    + Send + 'static,
+                __Aip160Column::SqlType: ::diesel_aip_160::pg_enum::EnumSqlType<#sql_type>,
+                Self: ::diesel_aip_160::diesel::serialize::ToSql<#sql_type, ::diesel_aip_160::diesel::pg::Pg> + Send + 'static,
+                #sql_type: ::diesel_aip_160::diesel::sql_types::SqlType<IsNull = ::diesel_aip_160::diesel::sql_types::is_nullable::NotNull>
+                    + ::diesel_aip_160::diesel::sql_types::SingleValue + 'static,
+                ::diesel_aip_160::diesel::pg::Pg: ::diesel_aip_160::diesel::sql_types::HasSqlType<#sql_type>,
+            {
+                ::diesel_aip_160::pg_enum::compare::<__Aip160Column, Self, #sql_type>(
+                    column, field, name, operator, value, Self::__aip160_from_label,
+                )
+            }
+
+            #[doc(hidden)]
+            pub fn __aip160_is_text<__Aip160Column>(_: __Aip160Column) -> bool { false }
+
+            #[doc(hidden)]
+            pub fn __aip160_like<__Aip160Column>(_: __Aip160Column, _: String, _: bool)
+                -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::diesel_helpers::Predicate<__Aip160Column::Table>>
+            where __Aip160Column: ::diesel_aip_160::diesel::Column,
+            {
+                ::diesel_aip_160::anyhow::bail!("enum fields do not support text search")
+            }
+        }
+
         impl #impl_generics ::diesel_aip_160::diesel::deserialize::FromSql<
             #sql_type, ::diesel_aip_160::diesel::pg::Pg,
         > for #model #type_generics #where_clause {
             fn from_sql(bytes: ::diesel_aip_160::diesel::pg::PgValue<'_>)
                 -> ::diesel_aip_160::diesel::deserialize::Result<Self>
             {
-                let value = ::std::str::from_utf8(bytes.as_bytes())?.parse::<#value_type>()?;
-                let inner: #inner = #from_value(value)?;
-                Ok(Self(inner))
+                Self::__aip160_from_label(::std::str::from_utf8(bytes.as_bytes())?)
             }
         }
 

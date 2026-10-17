@@ -20,6 +20,9 @@ pub mod diesel_helpers;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub mod native;
 pub mod parser;
+#[cfg(feature = "postgres")]
+#[doc(hidden)]
+pub mod pg_enum;
 
 pub use anyhow;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]

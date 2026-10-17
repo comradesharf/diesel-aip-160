@@ -16,7 +16,7 @@ pub enum ComparisonOperator {
 /// Selects who interprets a field's literals and builds its predicates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldType {
-    /// Built-in Diesel SQL type, including text, numbers, and JSON paths.
+    /// Schema- or type-driven comparisons, including built-ins and enum wrappers.
     Native,
     /// Application-defined type handled by a field adapter.
     Custom { nullable: bool },

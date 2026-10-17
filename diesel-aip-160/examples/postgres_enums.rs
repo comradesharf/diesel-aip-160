@@ -1,11 +1,58 @@
-//! Application adapters: numeric route ordering and protobuf-to-GTFS mapping.
+//! Derived PostgreSQL enum codecs and automatic filtering, with application
+//! adapters for numeric route ordering and protobuf-to-GTFS mapping.
+//!
+//! Run from the workspace root; SQL generation does not require a database:
+//!
+//! ```sh
+//! cargo run -p diesel-aip-160 --example postgres_enums --features postgres
+//! cargo test -p diesel-aip-160 --example postgres_enums --features postgres
+//! ```
+//!
+//! `Aip160PgEnum` generates `FromSql`/`ToSql` for a single-field tuple wrapper.
+//! Labels are parsed as `value_type` (`i16` here), validated by `from_value`, and
+//! serialized using `to_value` and the value's display representation. The
+//! application supplies these mappings; GTFS and protobuf conventions are not
+//! built into the library. `AsExpression` and `FromSqlRow` provide the additional
+//! Diesel integration for binding and loading the wrappers.
+//!
+//! Two filter models use the same schema and codecs:
+//!
+//! - `NativeRoute` accepts stored labels, quoted or unquoted, and binds typed
+//!   PostgreSQL enum values. It supports all six comparisons; `:` is equality.
+//!   Ordering follows PostgreSQL's enum declaration order, so with labels
+//!   `('1702', '3', '100')`, `route_type<100` matches both `1702` and `3`.
+//! - `Route` overrides automatic filtering with explicit field adapters.
+//!   `NumericRoute` accepts unquoted codes `3`, `100`, and `1702`, casts the
+//!   stored label through text to BIGINT, and compares numerically. Thus
+//!   `route_type<100` matches only `3`. Every stored route label must be
+//!   convertible to BIGINT for queries using this cast to execute successfully.
+//!   `ProtobufPickup` maps unquoted protobuf values `1..=4` to stored GTFS
+//!   labels `0..=3` and permits only equality and inequality (`:` also uses
+//!   equality). For example, `continuous_pickup=1` selects stored label `1`
+//!   with `NativeRoute`, but stored label `0` with `Route`.
+//!
+//! Both models support `field:*` for presence and unquoted `=null`/`!=null`
+//! on nullable fields. Quoted `null` is a label rather than a NULL check and
+//! fails numeric parsing here. Comparisons against NULL retain SQL's
+//! three-valued logic, including under `NOT`; the adapters' `assume_not_null()`
+//! changes Diesel's expression type without adding a SQL NULL fallback.
+//!
+//! The Rust SQL type declarations below do not create database types or tables.
+//! The ignored integration test creates session-local types and a temporary
+//! table on an explicitly supplied database. With native libpq and a PostgreSQL
+//! server available, set `AIP160_TEST_DATABASE_URL` and run:
+//!
+//! ```sh
+//! cargo test -p diesel-aip-160 --features postgres-integration \
+//!     --example postgres_enums postgres_executes -- --ignored
+//! ```
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Nullable};
-use diesel_aip_160::Aip160Filter;
 use diesel_aip_160::anyhow::{Result, bail, ensure};
 use diesel_aip_160::compiler::ComparisonOperator;
 use diesel_aip_160::diesel_helpers::{FieldAdapter, Predicate};
 use diesel_aip_160::parser::Value;
+use diesel_aip_160::{Aip160Filter, Aip160PgEnum};
 
 #[derive(diesel::sql_types::SqlType, diesel::query_builder::QueryId)]
 #[diesel(postgres_type(name = "route_type"))]
@@ -29,22 +76,82 @@ diesel::table! {
     }
 }
 
+// These domain enums stand in for types owned by a dependency. Local wrappers
+// let the application implement Diesel codecs without changing that dependency.
 #[derive(Debug)]
-struct RouteType;
+enum RouteKind {
+    Bus,
+    Rail,
+    HorseDrawnCarriage,
+}
 
-#[derive(Debug, diesel::expression::AsExpression)]
-#[diesel(sql_type = PickupSql)]
-struct Pickup(&'static str);
-
-impl diesel::serialize::ToSql<PickupSql, diesel::pg::Pg> for Pickup {
-    fn to_sql<'b>(
-        &'b self,
-        out: &mut diesel::serialize::Output<'b, '_, diesel::pg::Pg>,
-    ) -> diesel::serialize::Result {
-        use std::io::Write;
-        out.write_all(self.0.as_bytes())?;
-        Ok(diesel::serialize::IsNull::No)
+fn route_from_code(code: i16) -> diesel::deserialize::Result<RouteKind> {
+    match code {
+        3 => Ok(RouteKind::Bus),
+        100 => Ok(RouteKind::Rail),
+        1702 => Ok(RouteKind::HorseDrawnCarriage),
+        _ => Err(format!("unsupported route_type code: {code}").into()),
     }
+}
+
+fn route_to_code(route: &RouteKind) -> diesel::deserialize::Result<i16> {
+    Ok(match route {
+        RouteKind::Bus => 3,
+        RouteKind::Rail => 100,
+        RouteKind::HorseDrawnCarriage => 1702,
+    })
+}
+
+#[derive(
+    Debug, diesel::expression::AsExpression, diesel::deserialize::FromSqlRow, Aip160PgEnum,
+)]
+#[diesel(sql_type = RouteTypeSql)]
+#[aip160(value_type = i16, from_value = route_from_code, to_value = route_to_code)]
+struct RouteType(RouteKind);
+
+#[derive(Debug)]
+enum PickupKind {
+    Regular,
+    Unavailable,
+    PhoneAgency,
+    CoordinateWithDriver,
+}
+
+fn pickup_from_code(code: i16) -> diesel::deserialize::Result<PickupKind> {
+    match code {
+        0 => Ok(PickupKind::Regular),
+        1 => Ok(PickupKind::Unavailable),
+        2 => Ok(PickupKind::PhoneAgency),
+        3 => Ok(PickupKind::CoordinateWithDriver),
+        _ => Err(format!("unsupported GTFS pickup code: {code}").into()),
+    }
+}
+
+fn pickup_to_code(pickup: &PickupKind) -> diesel::deserialize::Result<i16> {
+    Ok(match pickup {
+        PickupKind::Regular => 0,
+        PickupKind::Unavailable => 1,
+        PickupKind::PhoneAgency => 2,
+        PickupKind::CoordinateWithDriver => 3,
+    })
+}
+
+#[derive(
+    Debug, diesel::expression::AsExpression, diesel::deserialize::FromSqlRow, Aip160PgEnum,
+)]
+#[diesel(sql_type = PickupSql)]
+#[aip160(value_type = i16, from_value = pickup_from_code, to_value = pickup_to_code)]
+struct Pickup(PickupKind);
+
+// No field adapters are needed for stored GTFS labels. Ordering follows the
+// PostgreSQL enum declaration, even when the labels look like numbers.
+#[derive(Aip160Filter)]
+#[diesel(table_name = routes)]
+#[allow(dead_code)]
+struct NativeRoute {
+    route_type: RouteType,
+    continuous_pickup: Pickup,
+    continuous_drop_off: Option<Pickup>,
 }
 
 struct NumericRoute;
@@ -82,13 +189,16 @@ impl FieldAdapter<routes::route_type> for NumericRoute {
 // Only these literals are accepted; protobuf 1..=4 maps to GTFS labels 0..=3.
 fn mapped_pickup(value: &Value) -> Result<Pickup> {
     ensure!(!value.quoted, "pickup requires an unquoted protobuf value");
-    Ok(Pickup(match value.text.as_str() {
-        "1" => "0",
-        "2" => "1",
-        "3" => "2",
-        "4" => "3",
+    let code = match value.text.as_str() {
+        "1" => 0,
+        "2" => 1,
+        "3" => 2,
+        "4" => 3,
         _ => bail!("pickup requires a protobuf value from 1 through 4"),
-    }))
+    };
+    Ok(Pickup(
+        pickup_from_code(code).map_err(diesel_aip_160::anyhow::Error::from_boxed)?,
+    ))
 }
 
 struct ProtobufPickup;
@@ -122,6 +232,7 @@ macro_rules! pickup_adapter {
 pickup_adapter!(continuous_pickup);
 pickup_adapter!(continuous_drop_off);
 
+// Explicit adapters override the wrappers' automatic filtering for this model.
 #[derive(Aip160Filter)]
 #[diesel(table_name = routes)]
 #[allow(dead_code)]
@@ -143,9 +254,18 @@ fn sql(filter: &str) -> Result<String> {
     Ok(diesel::debug_query::<diesel::pg::Pg, _>(&routes::table.filter(predicate)).to_string())
 }
 
+fn native_sql(filter: &str) -> Result<String> {
+    let predicate = NativeRoute::compile_filter(filter)?.unwrap();
+    Ok(diesel::debug_query::<diesel::pg::Pg, _>(&routes::table.filter(predicate)).to_string())
+}
+
 fn main() -> Result<()> {
     println!(
-        "{}",
+        "Stored GTFS labels (PostgreSQL enum order):\n{}",
+        native_sql("route_type>=100 AND continuous_pickup=1 AND continuous_drop_off!=null")?
+    );
+    println!(
+        "Numeric route order and protobuf pickup values:\n{}",
         sql("route_type>=100 AND continuous_pickup=2 AND order<=4294967295")?
     );
     Ok(())
@@ -154,6 +274,55 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_enums_filter_stored_labels_without_adapters() {
+        for operator in ["=", "!=", "<", "<=", ">", ">=", ":"] {
+            let query = native_sql(&format!("route_type{operator}100")).unwrap();
+            let operator = if operator == ":" { "=" } else { operator };
+            assert!(
+                query.contains(&format!("\"route_type\" {operator} $1")),
+                "{query}"
+            );
+            assert!(!query.contains("AS BIGINT"), "{query}");
+            assert!(query.ends_with("-- binds: [RouteType(Rail)]"), "{query}");
+        }
+        assert!(
+            native_sql("route_type='3'")
+                .unwrap()
+                .ends_with("-- binds: [RouteType(Bus)]")
+        );
+        // Automatic filtering uses stored labels; the protobuf adapter maps 1 to 0.
+        assert!(
+            native_sql("continuous_pickup=1")
+                .unwrap()
+                .ends_with("-- binds: [Pickup(Unavailable)]")
+        );
+        assert!(
+            sql("continuous_pickup=1")
+                .unwrap()
+                .ends_with("-- binds: [Pickup(Regular)]")
+        );
+        assert!(
+            native_sql("continuous_drop_off=null")
+                .unwrap()
+                .contains("IS NULL")
+        );
+        assert!(
+            native_sql("continuous_drop_off:*")
+                .unwrap()
+                .contains("IS NOT NULL")
+        );
+        for filter in [
+            "route_type=4",
+            "route_type=null",
+            "route_type.x=3",
+            "continuous_pickup=4",
+            "continuous_drop_off>null",
+        ] {
+            assert!(NativeRoute::compile_filter(filter).is_err(), "{filter}");
+        }
+    }
 
     /// Uses only session-local types/tables on an explicitly provided test database.
     #[cfg(feature = "postgres-integration")]
@@ -188,6 +357,33 @@ mod tests {
             .select(routes::id)
             .load::<i32>(&mut connection)?;
         assert_eq!(native, [3, 1, 2]);
+        for (filter, expected) in [
+            ("route_type<100", vec![1, 3]),
+            ("route_type>=100", vec![2]),
+            ("continuous_pickup=1", vec![2]),
+            ("continuous_drop_off=null", vec![1]),
+            ("continuous_drop_off:*", vec![2, 3]),
+        ] {
+            let predicate = NativeRoute::compile_filter(filter)?.unwrap();
+            let actual = routes::table
+                .filter(predicate)
+                .select(routes::id)
+                .order(routes::id)
+                .load::<i32>(&mut connection)?;
+            assert_eq!(actual, expected, "native: {filter}");
+        }
+        // The generated FromSql codecs decode the same domain values used by filters.
+        let (route, pickup, drop_off) = routes::table
+            .find(2)
+            .select((
+                routes::route_type,
+                routes::continuous_pickup,
+                routes::continuous_drop_off,
+            ))
+            .first::<(RouteType, Pickup, Option<Pickup>)>(&mut connection)?;
+        assert!(matches!(route.0, RouteKind::Rail));
+        assert!(matches!(pickup.0, PickupKind::Unavailable));
+        assert!(matches!(drop_off, Some(Pickup(PickupKind::PhoneAgency))));
         for (filter, expected) in [
             ("small=-2147483648", vec![1]),
             ("small=2147483647", vec![3]),
@@ -238,12 +434,17 @@ mod tests {
 
     #[test]
     fn enum_mapping_binds_typed_stored_labels() {
-        for (literal, label) in [(1, "0"), (2, "1"), (3, "2"), (4, "3")] {
+        for (literal, variant) in [
+            (1, "Regular"),
+            (2, "Unavailable"),
+            (3, "PhoneAgency"),
+            (4, "CoordinateWithDriver"),
+        ] {
             for field in ["continuous_pickup", "continuous_drop_off"] {
                 let query = sql(&format!("{field}={literal}")).unwrap();
                 assert!(query.contains(&format!("\"{field}\" = $1")), "{query}");
                 assert!(
-                    query.ends_with(&format!("-- binds: [Pickup(\"{label}\")]")),
+                    query.ends_with(&format!("-- binds: [Pickup({variant})]")),
                     "{query}"
                 );
             }
