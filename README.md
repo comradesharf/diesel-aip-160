@@ -155,9 +155,10 @@ These examples use the `Record` model above:
 | `NOT (name=Alice OR name=Bob)` | Negate a group |
 
 Supported comparison operators are `=`, `!=`, `<`, `<=`, `>`, `>=`, and `:`.
-Integer `:` behaves as equality. Integers must be unquoted signed decimal
-values within the field's 32-bit or 64-bit range; quoted numbers, fractions,
-and overflow are rejected. `i64` accepts the full uint32 range, including
+For signed 32-bit and 64-bit integers, `:` behaves as equality. Integers must
+be unquoted decimal values within the SQL column's signed or unsigned range;
+quoted numbers, fractions, negative unsigned values, and overflow are rejected.
+`i64` accepts the full uint32 range, including
 `4294967295`, without precision loss. Nullable integers support `=null`,
 `!=null`, and `:*`; ordering against NULL is rejected. Other comparisons and
 logical negation retain SQL three-valued NULL semantics.
@@ -189,6 +190,130 @@ negating predicates over nullable columns.
 This is AIP-160 filter syntax: CEL operators such as `==` and `&&`, function
 calls, and field-to-field comparisons are unsupported. For example,
 `name=note` compares the name to the literal text `note`.
+
+### Choose syntax by data type
+
+The column's **Diesel SQL type** determines which literals and operators are
+accepted. The field names below are illustrative; replace them with fields in
+your model. Types such as UUID, arrays, and ranges require a backend that
+supports them. See [native types and literal formats](#native-types-and-literal-formats)
+for optional representation features and backend limitations.
+
+| Data type | Example filters | How it works |
+| --- | --- | --- |
+| Text (`Text`, `VarChar`) | `name=Alice`, `name="Alice Smith"`, `name:ali`, `name="Ali*"` | `=` compares text; `:` searches for a case-insensitive substring; `*` in `=` / `!=` is a wildcard. Quote spaces or special characters. |
+| Boolean (`Bool`) | `enabled=true`, `enabled!=false` | Use lowercase, unquoted `true` or `false`; `"true"` and `1` are rejected. |
+| Signed integer (`SmallInt`, `Integer`, `BigInt`) | `age>=18`, `balance<0`, `id=(1 OR 2)` | Use unquoted whole numbers within the SQL type's range. Ordering is numeric. |
+| MySQL unsigned integer | `code=65535`, `code>=100` | Use unquoted nonnegative whole numbers within the unsigned column's range. |
+| Floating point (`Float`, `Double`) | `score>=1.25`, `ratio<1e-3` | Use unquoted finite numbers; scientific notation is accepted. |
+| Decimal (`Numeric`) | `amount>=19.95` | Use an unquoted decimal. PostgreSQL and MySQL preserve decimal precision; SQLite follows floating-point storage behavior. |
+| Date (`Date`) | `day="2026-10-17"` | Quote an ISO date. |
+| Time (`Time`) | `clock>="12:34:56"` | Quote an ISO time; fractional seconds are supported. |
+| Timestamp (`Timestamp`) | `created_at>="2026-10-17T12:34:56"` | Quote an ISO timestamp without a timezone. |
+| Timestamp with timezone | `created_at>="2026-10-17T12:34:56Z"`, `created_at<"2026-10-18T00:00:00+08:00"` | Quote an RFC 3339 timestamp with `Z` or an explicit offset. |
+| Binary (`Binary`) | `bytes="0xdeadbeef"` | Quote hexadecimal bytes with a `0x` prefix and an even number of hex digits. |
+| UUID (`Uuid`) | `key="550e8400-e29b-41d4-a716-446655440000"` | Quote the UUID string. |
+| Network (`Inet`, `Cidr`) | `network="192.168.1.0/24"` | Quote the address, optionally with a prefix length. |
+| PostgreSQL array | `tags="{rust,diesel}"`, `tags:"{rust}"` | `=` compares the array; `:` checks that it contains the supplied array. Use a quoted PostgreSQL array literal. |
+| PostgreSQL range / multirange | `window:"[1,10)"`, `windows:"{[1,10)}"` | `:` checks containment of the supplied range or multirange. Quote the native literal. |
+| JSON (`Json`) | `payload='{"enabled":true}'`, `payload:'{"enabled":true}'` | Quote valid JSON. `=` / `!=` compare values; `:` checks containment on PostgreSQL and MySQL. SQLite rejects containment. |
+| PostgreSQL JSONB (`Jsonb`) | `payload.enabled=true`, `payload.count>=10`, `payload:'{"enabled":true}'` | Dotted paths compare JSON values; `:` checks JSONB containment. Unquoted booleans/numbers stay JSON booleans/numbers; quoted scalar values become JSON strings. |
+| Nullable column (`Nullable<T>`, usually `Option<T>`) | `note=null`, `note!=null`, `note:*` | Unquoted `null` checks SQL NULL; `!=null` and `:*` check for a non-NULL value. Ordinary values follow the underlying type's rules. |
+| Custom SQL type / enum | `route_type=3`, `route_type>=100` | An explicit field adapter defines accepted literals and comparisons; see [custom fields and PostgreSQL enums](#custom-fields-and-postgresql-enums). |
+
+Use `=` / `!=` for equality and `<`, `<=`, `>`, `>=` for ordering where the
+type and backend support it. `:` is type-specific: text substring search,
+signed 32/64-bit integer equality, or container containment. It is not a general
+alias for equality on booleans, floats, decimals, or other scalar types.
+The unquoted presence check `field:*` is handled separately.
+
+For example, a model with text `name`, boolean `enabled`, integer `age`,
+decimal `amount`, timestamp `created_at`, and nullable text `note` can combine
+typed predicates in one filter:
+
+```text
+name:ali AND enabled=true AND age>=18 AND amount<100.00 AND created_at>="2026-10-17T00:00:00" AND note:*
+```
+
+Quoting changes literal interpretation: `age=18` is valid but `age="18"` is
+rejected; `note=null` checks SQL NULL while `note="null"` matches text.
+For JSONB, `payload.count=10` compares a JSON number while
+`payload.count="10"` compares a JSON string. A dotted JSONB `=null` compares
+JSON null, and dotted `:*` checks path existence, including JSON null.
+
+### Equivalent SQL by data type
+
+Each SQL fragment below can be used after `WHERE`. Semicolon-separated
+fragments correspond to separate filter examples, in the same order as the
+examples above. Values are shown inline for readability; the library binds
+values and JSON paths as parameters. Identifier quoting, table qualifiers,
+parentheses, and some casts are omitted. PostgreSQL syntax is used unless a
+backend is named explicitly.
+
+| Data type | Equivalent SQL predicates |
+| --- | --- |
+| Text | `name = 'Alice'`; `name = 'Alice Smith'`; `LOWER(name) LIKE LOWER('%ali%') ESCAPE E'\\'`; `name LIKE 'Ali%' ESCAPE E'\\'` |
+| Boolean | `enabled = TRUE`; `enabled != FALSE` |
+| Signed integer | `age >= 18`; `balance < 0`; `(id = 1 OR id = 2)` |
+| MySQL unsigned integer | `code = 65535`; `code >= 100` |
+| Floating point | `score >= 1.25`; `ratio < 1e-3` |
+| Decimal | PostgreSQL: `amount >= CAST('19.95' AS numeric)`; MySQL: `amount >= CAST('19.95' AS DECIMAL(65,2))`; SQLite: `amount >= 19.95` |
+| Date | `day = CAST('2026-10-17' AS date)` |
+| Time | `clock >= CAST('12:34:56' AS time)` |
+| Timestamp | `created_at >= CAST('2026-10-17T12:34:56' AS timestamp)` |
+| Timestamp with timezone | `created_at >= CAST('2026-10-17T12:34:56Z' AS timestamptz)`; `created_at < CAST('2026-10-18T00:00:00+08:00' AS timestamptz)` |
+| Binary | PostgreSQL: `bytes = decode('deadbeef', 'hex')`; MySQL / SQLite: `bytes = X'deadbeef'`. The library binds decoded bytes directly. |
+| UUID | `key = CAST('550e8400-e29b-41d4-a716-446655440000' AS uuid)` |
+| Network | For `Inet`: `network = CAST('192.168.1.0/24' AS inet)`; for `Cidr`, use `cidr` instead. |
+| PostgreSQL array | For `Array<Text>`: `tags = CAST('{rust,diesel}' AS text[])`; `tags @> CAST('{rust}' AS text[])` |
+| PostgreSQL range / multirange | For integer ranges: `"window" @> CAST('[1,10)' AS int4range)`; `windows @> CAST('{[1,10)}' AS int4multirange)` |
+| JSON (PostgreSQL) | `CAST(payload AS jsonb) = CAST('{"enabled":true}' AS jsonb)`; `CAST(payload AS jsonb) @> CAST('{"enabled":true}' AS jsonb)` |
+| JSON (MySQL) | `payload = CAST('{"enabled":true}' AS JSON)`; `JSON_CONTAINS(payload, CAST('{"enabled":true}' AS JSON))` |
+| JSON (SQLite) | `json(payload) = json('{"enabled":true}')`; containment is rejected. |
+| PostgreSQL JSONB | `(payload #> ARRAY['enabled']) = 'true'::jsonb`; `(payload #> ARRAY['count']) >= '10'::jsonb`; `(payload #> ARRAY[]::text[]) @> '{"enabled":true}'::jsonb` |
+| Nullable column | `note IS NULL`; `note IS NOT NULL`; `note IS NOT NULL` |
+| Custom SQL type / enum | With the example `NumericRoute` adapter: `CAST(CAST(route_type AS TEXT) AS BIGINT) = 3`; `CAST(CAST(route_type AS TEXT) AS BIGINT) >= 100`. Other adapters define their own SQL. |
+
+For MySQL temporal columns, the generated value casts use `DATE`, `TIME(6)`,
+and `DATETIME(6)`. SQLite binds temporal strings normalized to Diesel's storage
+format when the matching `chrono` or `time` feature is enabled. SQLite and MySQL
+bind booleans as `1` / `0`. Text search on those backends uses the same
+`LOWER(...) LIKE LOWER(...)` expression with a bound backslash escape character
+instead of PostgreSQL's `E'\\'` notation.
+
+Additional PostgreSQL native types from the literal-format table translate as
+follows:
+
+| Filter | Equivalent SQL predicate |
+| --- | --- |
+| `duration="1 day 2 hours"` (`Interval`) | `duration = CAST('1 day 2 hours' AS interval)` |
+| `price="$12.34"` (`Money`) | `price = CAST('$12.34' AS money)` |
+| `mac="08:00:2b:01:02:03"` (`MacAddr`) | `mac = CAST('08:00:2b:01:02:03' AS macaddr)` |
+| `position="0/16B6C50"` (`PgLsn`) | `position = CAST('0/16B6C50' AS pg_lsn)` |
+| `pair='(7,"seven")'` (`Record<(Integer, Text)>`) | `pair = ROW(7, 'seven')` |
+| `name=alice` (`Citext`) | `name = CAST('alice' AS citext)`; the database's `citext` operators provide case-insensitive equality. |
+| `flag="a"` (`CChar`) | `flag = CAST('a' AS "char")`; the library binds the single byte using Diesel's `CChar` type. |
+
+JSONB quoting and presence checks have distinct SQL meanings:
+
+| Filter | Equivalent SQL predicate |
+| --- | --- |
+| `payload.count=10` | `(payload #> ARRAY['count']) = '10'::jsonb` |
+| `payload.count="10"` | `(payload #> ARRAY['count']) = '"10"'::jsonb` |
+| `payload.count=null` | `(payload #> ARRAY['count']) = 'null'::jsonb` |
+| `payload.count:*` | `(payload #> ARRAY['count']) IS NOT NULL` |
+| `payload=null` (nullable JSONB column) | `payload IS NULL` |
+
+The combined filter above is equivalent to this PostgreSQL query predicate:
+
+```sql
+WHERE LOWER(name) LIKE LOWER('%ali%') ESCAPE E'\\'
+  AND enabled = TRUE
+  AND age >= 18
+  AND amount < CAST('100.00' AS numeric)
+  AND created_at >= CAST('2026-10-17T00:00:00' AS timestamp)
+  AND note IS NOT NULL
+```
 
 ## PostgreSQL JSONB
 
