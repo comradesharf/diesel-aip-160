@@ -405,8 +405,9 @@ remains an ordinary adapter literal. Compare nullable values with Diesel's
 without changing SQL NULL semantics.
 
 The complete, compiling [PostgreSQL enum example](diesel-aip-160/examples/postgres_enums.rs)
-shows numeric route labels `3`, `100`, `1702`, nullable BIGINT `order`, and
-application mappings from protobuf pickup/drop-off literals `1`–`4` to stored
+shows `Aip160PgEnum` codecs and automatic filtering of stored GTFS labels in
+`NativeRoute`. Its `Route` model overrides filtering with numeric route ordering
+for labels `3`, `100`, `1702`, nullable BIGINT `order`, and application mappings from protobuf pickup/drop-off literals `1`–`4` to stored
 GTFS labels `0`–`3`. The numeric adapter explicitly casts enum → text → BIGINT
 using a fixed application SQL expression, so `3 < 100 < 1702` regardless of
 PostgreSQL enum declaration order. The pickup adapter binds a value of the

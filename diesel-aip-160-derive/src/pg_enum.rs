@@ -26,9 +26,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     for attribute in &input.attrs {
         if attribute.path().is_ident("diesel") {
             // Other Diesel derives can share this attribute (e.g. not_sized).
-            let entries = attribute.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-            )?;
+            let entries = crate::attributes::options(attribute)?;
             for entry in entries {
                 if entry.path().is_ident("sql_type") {
                     let syn::Meta::NameValue(entry) = entry else {
