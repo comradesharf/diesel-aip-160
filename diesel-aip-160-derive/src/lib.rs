@@ -10,6 +10,25 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Fields, GenericArgument, PathArguments, Type, parse_macro_input};
 
+mod pg_enum;
+
+/// Generate PostgreSQL enum codecs for a local newtype around a dependency type.
+///
+/// Requires `#[diesel(sql_type = SqlType)]` and
+/// `#[aip160(value_type = i16, from_value = decode, to_value = encode)]`.
+/// `decode` takes the parsed value and returns `Result<Inner, E>`; `encode`
+/// takes `&Inner` and returns `Result<ValueType, E>`. Errors must convert to
+/// `Box<dyn std::error::Error + Send + Sync>`. Values use `FromStr`/`Display`
+/// to read/write PostgreSQL enum labels. Enable the runtime's `postgres` feature.
+/// Derive Diesel's `AsExpression` and `FromSqlRow` separately.
+#[proc_macro_derive(Aip160PgEnum, attributes(aip160, diesel))]
+pub fn derive_aip160_pg_enum(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    pg_enum::expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Generate a typed filter compiler and a `compile_filter` method for a Diesel model.
 ///
 /// Use `#[diesel(table_name = ...)]` to specify the table and `#[aip160(skip)]`
@@ -121,50 +140,11 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             "Aip160Filter requires named fields",
         ));
     };
-    let mut custom_comparisons = Vec::new();
-    let mut comparisons = Vec::new();
     let mut types = Vec::new();
-    let mut likes = Vec::new();
+    let mut natives = Vec::new();
+    let mut customs = Vec::new();
+    let mut texts = Vec::new();
     let mut ilikes = Vec::new();
-    let mut text_names = Vec::new();
-    let mut json_types = Vec::new();
-    let mut json_comparisons = Vec::new();
-    let mut json_containments = Vec::new();
-    let mut json_presences = Vec::new();
-    let mut jsonb_columns = Vec::new();
-    for field in &fields.named {
-        let (skip, adapter) = field_options(field)?;
-        if skip || adapter.is_some() {
-            continue;
-        }
-        let (ty, _) = unwrap_option(&field.ty);
-        if [
-            "bool", "i8", "i16", "u8", "u16", "u32", "u64", "i128", "u128", "isize", "usize",
-            "f32", "f64", "Vec",
-        ]
-        .iter()
-        .any(|name| is_type(ty, name))
-            || !matches!(ty, Type::Path(_))
-        {
-            return Err(syn::Error::new_spanned(
-                &field.ty,
-                "unsupported Aip160Filter field type; use #[aip160(adapter = MyAdapter)] for custom filtering or #[aip160(skip)] to exclude it",
-            ));
-        }
-        if !is_type(ty, "String") && !is_type(ty, "i32") && !is_type(ty, "i64") {
-            jsonb_columns.push((field.ident.as_ref().unwrap().clone(), ty.clone()));
-        }
-    }
-    for (ident, ty) in &jsonb_columns {
-        let name = ident.to_string();
-        let path = quote!(::diesel_aip_160::json_path::<#ty>(field, #name));
-        json_types.push(
-            quote!(if #path.is_some() { return Ok(::diesel_aip_160::compiler::FieldType::Jsonb); }),
-        );
-        json_comparisons.push(quote!(if let Some(path) = #path { return Ok(::diesel_aip_160::diesel_helpers::jsonb_compare(#table::#ident, path, operator, value)); }));
-        json_containments.push(quote!(if let Some(path) = #path { return Ok(::diesel_aip_160::diesel_helpers::jsonb_contains(#table::#ident, path, value)); }));
-        json_presences.push(quote!(if let Some(path) = #path { return Ok(::diesel_aip_160::diesel_helpers::jsonb_presence(#table::#ident, path)); }));
-    }
     for field in &fields.named {
         let (skip, adapter) = field_options(field)?;
         if skip {
@@ -173,80 +153,21 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let ident = field.ident.as_ref().unwrap();
         let name = ident.to_string();
         let (ty, nullable) = unwrap_option(&field.ty);
-        if let Some(adapter) = adapter {
-            types.push(quote!(#name => Ok(::diesel_aip_160::compiler::FieldType::Custom { nullable: #nullable }),));
-            custom_comparisons.push(quote!(#name => <#adapter as ::diesel_aip_160::diesel_helpers::FieldAdapter<#table::#ident>>::compare(#table::#ident, operator, value),));
-            continue;
-        }
-        let kind = if is_type(ty, "String") {
-            "string"
-        } else if is_type(ty, "i32") || is_type(ty, "i64") {
-            "integer"
-        } else {
-            continue;
-        };
         let column = quote!(#table::#ident);
-        if kind == "string" {
-            types.push(
-                quote!(#name => Ok(::diesel_aip_160::compiler::FieldType::String { nullable: #nullable }),),
-            );
-            text_names.push(name.clone());
-            comparisons.push(quote! {
-                (#name, ::diesel_aip_160::compiler::FilterLiteral::String(value)) =>
-                    ::diesel_aip_160::diesel_helpers::compare_string_column(#column, operator, Some(value)),
-            });
-            if nullable {
-                comparisons.push(quote! {
-                    (#name, ::diesel_aip_160::compiler::FilterLiteral::Null) =>
-                        ::diesel_aip_160::diesel_helpers::compare_string_column(#column, operator, None),
-                });
-            }
-            comparisons.push(quote! {
-                (#name, value) => ::diesel_aip_160::anyhow::bail!("field `{}` requires a string value, received {value:?}", #name),
-            });
-            let expression = if nullable {
-                quote!(#column.like(pattern).escape('\\').assume_not_null())
-            } else {
-                quote!(#column.like(pattern).escape('\\'))
-            };
-            likes.push(quote!(#name => Ok(Box::new(#expression)),));
-            ilikes.push(quote! {
-                #name => Ok(Box::new(
-                    ::diesel_aip_160::diesel_helpers::lower(#column.nullable())
-                        .like(::diesel_aip_160::diesel_helpers::lower(
-                            pattern.into_sql::<::diesel_aip_160::diesel::sql_types::Text>().nullable()
-                        ))
-                        .escape('\\')
-                        .assume_not_null()
-                )),
-            });
-        } else {
-            let (field_type, literal, helper) = if is_type(ty, "i64") {
-                (
-                    quote!(Int64 { nullable: #nullable }),
-                    quote!(Int64),
-                    quote!(compare_bigint_column),
-                )
-            } else if nullable {
-                (
-                    quote!(NullableInt32),
-                    quote!(Int),
-                    quote!(compare_integer_column),
-                )
-            } else {
-                (quote!(Int32), quote!(Int), quote!(compare_integer_column))
-            };
-            types.push(quote!(#name => Ok(::diesel_aip_160::compiler::FieldType::#field_type),));
-            comparisons.push(quote! {
-                (#name, ::diesel_aip_160::compiler::FilterLiteral::#literal(value)) =>
-                    ::diesel_aip_160::diesel_helpers::#helper(#column, operator, Some(value)),
-                (#name, ::diesel_aip_160::compiler::FilterLiteral::Null) =>
-                    ::diesel_aip_160::diesel_helpers::#helper(#column, operator, None),
-                (#name, value) => ::diesel_aip_160::anyhow::bail!("field `{}` requires an integer value, received {value:?}", #name),
-            });
+        if let Some(adapter) = adapter {
+            types.push(quote!(if field == #name { return Ok(::diesel_aip_160::compiler::FieldType::Custom { nullable: #nullable }); }));
+            customs.push(quote!(#name => <#adapter as ::diesel_aip_160::diesel_helpers::FieldAdapter<#column>>::compare(#column, operator, value),));
+            continue;
         }
+        types.push(quote!(if let Some(ty) = ::diesel_aip_160::native::field_type::<#column, #ty>(#column, field, #name) { return Ok(ty); }));
+        natives.push(quote!(if ::diesel_aip_160::native::field_type::<#column, #ty>(#column, field, #name).is_some() {
+            return ::diesel_aip_160::native::compare::<#column, #ty>(#column, field, #name, operator, value);
+        }));
+        texts.push(
+            quote!(if ::diesel_aip_160::native::is_text::<#column>() { fields.push(#name); }),
+        );
+        ilikes.push(quote!(#name => ::diesel_aip_160::native::like(#column, pattern, true),));
     }
-    let predicate = format_ident!("{}Predicate", compiler);
     Ok(quote! {
         impl #model {
             pub fn compile_filter(source: &str) -> ::diesel_aip_160::anyhow::Result<Option<::diesel_aip_160::diesel_helpers::Predicate<#table::table>>> {
@@ -254,54 +175,42 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
         pub struct #compiler;
-        type #predicate = ::diesel_aip_160::diesel_helpers::Predicate<#table::table>;
         impl ::diesel_aip_160::compiler::Aip160FilterCompiler for #compiler {
-            type Predicate = #predicate;
-            fn compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator,
-                value: ::diesel_aip_160::compiler::FilterLiteral) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
-                match (field, value) {
-                    #(#comparisons)*
-                    _ => ::diesel_aip_160::anyhow::bail!("unknown or unsupported filter field `{field}`"),
-                }
-            }
+            type Predicate = ::diesel_aip_160::diesel_helpers::Predicate<#table::table>;
             fn custom_compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator,
                 value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
-                match field { #(#custom_comparisons)* _ => ::diesel_aip_160::anyhow::bail!("unknown adapter field `{field}`"), }
+                match field { #(#customs)* _ => ::diesel_aip_160::anyhow::bail!("unknown adapter field `{field}`"), }
+            }
+            fn native_compare(&self, field: &str, operator: ::diesel_aip_160::parser::Comparator,
+                value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+                #(#natives)*
+                ::diesel_aip_160::anyhow::bail!("unknown filter field `{field}`")
+            }
+            fn field_type(&self, field: &str) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::compiler::FieldType> {
+                #(#types)*
+                ::diesel_aip_160::anyhow::bail!("unknown filter field `{field}`")
+            }
+            fn text_fields(&self) -> &'static [&'static str] {
+                static FIELDS: ::std::sync::OnceLock<Vec<&'static str>> = ::std::sync::OnceLock::new();
+                FIELDS.get_or_init(|| { let mut fields = Vec::new(); #(#texts)* fields }).as_slice()
+            }
+            fn ilike(&self, field: &str, pattern: String) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+                match field { #(#ilikes)* _ => ::diesel_aip_160::anyhow::bail!("unknown string field `{field}`"), }
             }
             fn constant(&self, value: bool) -> Self::Predicate {
+                use ::diesel_aip_160::diesel::IntoSql;
                 Box::new(value.into_sql::<::diesel_aip_160::diesel::sql_types::Bool>())
             }
             fn and(&self, left: Self::Predicate, right: Self::Predicate) -> Self::Predicate {
+                use ::diesel_aip_160::diesel::BoolExpressionMethods;
                 Box::new(left.and(right))
             }
             fn or(&self, left: Self::Predicate, right: Self::Predicate) -> Self::Predicate {
+                use ::diesel_aip_160::diesel::BoolExpressionMethods;
                 Box::new(left.or(right))
             }
             fn not(&self, predicate: Self::Predicate) -> Self::Predicate {
                 Box::new(::diesel_aip_160::diesel::dsl::not(predicate))
-            }
-            fn field_type(&self, field: &str) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::compiler::FieldType> {
-                #(#json_types)*
-                match field { #(#types)* _ => ::diesel_aip_160::anyhow::bail!("unknown or unsupported filter field `{field}"), }
-            }
-            fn text_fields(&self) -> &'static [&'static str] { &[#(#text_names),*] }
-            fn like(&self, field: &str, pattern: String) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
-                match field { #(#likes)* _ => ::diesel_aip_160::anyhow::bail!("unknown or unsupported string field `{field}"), }
-            }
-            fn ilike(&self, field: &str, pattern: String) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
-                match field { #(#ilikes)* _ => ::diesel_aip_160::anyhow::bail!("unknown or unsupported string field `{field}`"), }
-            }
-            fn json_compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator, value: ::diesel_aip_160::serde_json::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
-                #(#json_comparisons)*
-                ::diesel_aip_160::anyhow::bail!("unknown JSONB field `{field}`")
-            }
-            fn json_contains(&self, field: &str, value: ::diesel_aip_160::serde_json::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
-                #(#json_containments)*
-                ::diesel_aip_160::anyhow::bail!("unknown JSONB field `{field}`")
-            }
-            fn json_present(&self, field: &str) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
-                #(#json_presences)*
-                ::diesel_aip_160::anyhow::bail!("unknown JSONB field `{field}`")
             }
         }
     })
@@ -347,10 +256,6 @@ fn unwrap_option(ty: &Type) -> (&Type, bool) {
         return (inner, true);
     }
     (ty, false)
-}
-
-fn is_type(ty: &Type, name: &str) -> bool {
-    matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == name))
 }
 
 #[cfg(test)]
@@ -412,12 +317,11 @@ mod tests {
             }
         };
         let output = compact(expand(input).unwrap());
-        println!("Generated code: {}", output);
         assert!(output.contains("RecordFilterCompiler"));
-        assert!(output.contains("FieldType::String{nullable:false}"));
-        assert!(output.contains("FieldType::String{nullable:true}"));
-        assert!(output.contains("FieldType::Int32"));
-        assert!(output.contains("json_path::<Details>(field,\"details\")"));
+        assert!(output.contains("native::field_type::<records::name,String>"));
+        assert!(output.contains("native::field_type::<records::optional_name,String>"));
+        assert!(output.contains("native::field_type::<records::count,i32>"));
+        assert!(output.contains("native::field_type::<records::details,Details>"));
         assert!(!output.contains("\"ignored\""));
     }
 
@@ -434,9 +338,9 @@ mod tests {
             }
         };
         let output = compact(expand(input).unwrap());
-        assert!(output.contains("FieldType::NullableInt32"));
-        assert!(output.contains("FieldType::Int64{nullable:false}"));
-        assert!(output.contains("FieldType::Int64{nullable:true}"));
+        assert!(output.contains("native::field_type::<records::small,i32>"));
+        assert!(output.contains("native::field_type::<records::large,i64>"));
+        assert!(output.contains("native::field_type::<records::optional,i64>"));
         assert!(output.contains("FieldAdapter<records::code>"));
         assert!(!output.contains("json_path"));
     }
@@ -447,8 +351,7 @@ mod tests {
             #[diesel(table_name = records)]
             struct Record { enabled: bool }
         };
-        let error = expand(input).unwrap_err().to_string();
-        assert!(error.contains("adapter") && error.contains("skip"));
+        assert!(expand(input).is_ok());
         for attributes in [
             quote!(skip, adapter = Adapter),
             quote!(adapter = A, adapter = B),

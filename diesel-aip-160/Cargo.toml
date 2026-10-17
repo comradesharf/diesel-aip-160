@@ -19,12 +19,27 @@ features = ["postgres"]
 anyhow.workspace = true
 diesel = { workspace = true, optional = true, default-features = false }
 serde_json = "1"
+chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
+time = { version = "0.3", optional = true, features = ["parsing", "formatting"] }
+uuid = { version = "1", optional = true }
+bigdecimal = { version = "0.4", optional = true }
+ipnet = { version = "2", optional = true }
+libsqlite3-sys = { version = "0.38", optional = true, features = ["bundled"] }
 diesel-aip-160-derive = { path = "../diesel-aip-160-derive", version = "0.1.0-beta.3" }
 
 [features]
 default = []
-sqlite = ["dep:diesel", "diesel/sqlite"]
-mysql = ["dep:diesel", "diesel/mysql_backend"]
+chrono = ["dep:chrono", "diesel?/chrono"]
+time = ["dep:time", "diesel?/time"]
+uuid = ["dep:uuid", "diesel?/uuid"]
+numeric = ["dep:bigdecimal", "diesel?/numeric"]
+network-address = ["diesel?/network-address"]
+ipnet-address = ["dep:ipnet", "diesel?/ipnet-address"]
+native-types = ["chrono", "time", "uuid", "numeric", "ipnet-address"]
+sqlite-integration = ["sqlite", "dep:libsqlite3-sys"]
+mysql-integration = ["mysql", "diesel/mysql"]
+sqlite = ["dep:diesel", "diesel/sqlite", "diesel/serde_json"]
+mysql = ["dep:diesel", "diesel/mysql_backend", "diesel/serde_json"]
 postgres-integration = ["postgres", "diesel/postgres"]
 postgres = ["dep:diesel", "diesel/postgres_backend", "diesel/serde_json"]
 
@@ -47,3 +62,6 @@ required-features = ["postgres"]
 [[example]]
 name = "postgres_enums"
 required-features = ["postgres"]
+
+[dev-dependencies]
+diesel = { workspace = true, default-features = false, features = ["32-column-tables"] }

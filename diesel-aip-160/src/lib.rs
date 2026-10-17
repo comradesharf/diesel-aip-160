@@ -17,12 +17,14 @@
 pub mod compiler;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub mod diesel_helpers;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
+pub mod native;
 pub mod parser;
 
 pub use anyhow;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub use diesel;
-pub use diesel_aip_160_derive::{Aip160Filter, Aip160Jsonb};
+pub use diesel_aip_160_derive::{Aip160Filter, Aip160Jsonb, Aip160PgEnum};
 pub use serde_json;
 
 /// Split a JSONB field name into a column-relative path. The caller supplies

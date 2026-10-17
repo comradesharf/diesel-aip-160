@@ -205,3 +205,50 @@ fn integer_ranges_nulls_and_parameter_binding() {
     );
     assert!(!query.contains("COALESCE"));
 }
+
+#[test]
+fn native_scalar_dispatch_preserves_literal_and_composite_semantics() {
+    for (filter, literal) in [
+        ("name=001", "001"),
+        ("name=true", "true"),
+        ("name=null", "null"),
+        ("note='null'", "null"),
+        ("name=a.b", "a.b"),
+        ("name=note", "note"),
+    ] {
+        let query = sql(filter);
+        assert!(
+            query.ends_with(&format!("-- binds: [{literal:?}]")),
+            "{query}"
+        );
+        assert!(!query.contains("IS NULL"), "{query}");
+    }
+    for filter in ["id:30", "small:30", "wide:30", "order:30"] {
+        let query = sql(filter);
+        assert!(
+            query.contains(" = ") && query.ends_with("-- binds: [30]"),
+            "{query}"
+        );
+    }
+    for filter in ["note:null", "note>null", "small:null", "wide:null"] {
+        assert!(Record::compile_filter(filter).is_err(), "{filter}");
+    }
+    for filter in ["name='a%_*b'", "name!='a%_*b'"] {
+        let query = sql(filter);
+        assert!(
+            query.contains(" LIKE ") && query.contains("ESCAPE"),
+            "{query}"
+        );
+        assert!(query.contains(r"a\\%\\_%b"), "{query}");
+        assert_eq!(query.contains("NOT"), filter.contains("!="), "{query}");
+    }
+    let query = sql("name=(A OR NOT B) AND wide>=9007199254740993");
+    assert!(
+        query.contains(" OR ") && query.contains("NOT") && query.contains(" AND "),
+        "{query}"
+    );
+    assert!(
+        query.ends_with("-- binds: [\"A\", \"B\", 9007199254740993]"),
+        "{query}"
+    );
+}

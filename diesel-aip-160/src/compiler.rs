@@ -3,15 +3,6 @@
 use super::parser::{self, Argument, Comparable, Comparator, Expression, Value};
 use anyhow::{Result, bail, ensure};
 
-/// Validated scalar values passed to Diesel; integers retain their exact value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FilterLiteral {
-    String(String),
-    Int(i32),
-    Int64(i64),
-    Null,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComparisonOperator {
     Equal,
@@ -22,35 +13,26 @@ pub enum ComparisonOperator {
     GreaterThanOrEqual,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Selects who interprets a field's literals and builds its predicates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldType {
-    String {
-        nullable: bool,
-    },
-    Int32,
-    NullableInt32,
-    Int64 {
-        nullable: bool,
-    },
-    /// Literal interpretation and predicate construction belong to the adapter.
-    Custom {
-        nullable: bool,
-    },
-    Jsonb,
+    /// Built-in Diesel SQL type, including text, numbers, and JSON paths.
+    Native,
+    /// Application-defined type handled by a field adapter.
+    Custom { nullable: bool },
 }
 
-/// Typed operations required by an AIP-160 backend. No expression runtime is
-/// involved: the Diesel implementations build parameterized SQL directly.
+/// Operations required to compile an AIP-160 expression. Native handlers and
+/// custom adapters receive the original literal spelling and quoting.
 pub trait Aip160FilterCompiler {
     type Predicate;
 
-    fn compare(
+    fn native_compare(
         &self,
         field: &str,
-        operator: ComparisonOperator,
-        value: FilterLiteral,
+        operator: Comparator,
+        value: &Value,
     ) -> Result<Self::Predicate>;
-    /// Custom fields receive the original spelling and quoting, without text wildcard handling.
     fn custom_compare(
         &self,
         field: &str,
@@ -66,27 +48,9 @@ pub trait Aip160FilterCompiler {
     fn not(&self, predicate: Self::Predicate) -> Self::Predicate;
     fn field_type(&self, field: &str) -> Result<FieldType>;
     fn text_fields(&self) -> &'static [&'static str];
-    /// Match a wildcard pattern using the backend's existing LIKE semantics.
-    fn like(&self, field: &str, pattern: String) -> Result<Self::Predicate>;
-    /// Match a substring pattern without regard to case. Patterns are already
-    /// escaped; implementations must preserve SQL NULL semantics.
+    /// Match an escaped substring pattern without regard to case, preserving
+    /// SQL NULL semantics.
     fn ilike(&self, field: &str, pattern: String) -> Result<Self::Predicate>;
-    fn json_compare(
-        &self,
-        field: &str,
-        operator: ComparisonOperator,
-        value: serde_json::Value,
-    ) -> Result<Self::Predicate> {
-        let _ = (operator, value);
-        bail!("JSONB comparison is not supported for `{field}`")
-    }
-    fn json_contains(&self, field: &str, value: serde_json::Value) -> Result<Self::Predicate> {
-        let _ = value;
-        bail!("JSONB containment is not supported for `{field}`")
-    }
-    fn json_present(&self, field: &str) -> Result<Self::Predicate> {
-        bail!("JSONB presence is not supported for `{field}`")
-    }
 }
 
 /// Parse, validate and compile an AIP-160 filter.
@@ -216,123 +180,33 @@ fn compare<C: Aip160FilterCompiler>(
     operator: Comparator,
     value: &Value,
 ) -> Result<C::Predicate> {
-    let field_type = compiler.field_type(field)?;
-    if operator == Comparator::Has && !value.quoted && value.text == "*" {
-        // Documented scalar presence extension: NULL is absent; nonnullable
-        // scalar columns are always present, including empty strings and zero.
-        return match field_type {
-            FieldType::String { nullable: true }
-            | FieldType::NullableInt32
-            | FieldType::Int64 { nullable: true } => {
-                compiler.compare(field, ComparisonOperator::NotEqual, FilterLiteral::Null)
+    match compiler.field_type(field)? {
+        FieldType::Native => compiler.native_compare(field, operator, value),
+        FieldType::Custom { nullable } => {
+            if operator == Comparator::Has && !value.quoted && value.text == "*" {
+                return if nullable {
+                    compiler.custom_compare(
+                        field,
+                        ComparisonOperator::NotEqual,
+                        &Value {
+                            text: "null".into(),
+                            quoted: false,
+                        },
+                    )
+                } else {
+                    Ok(compiler.constant(true))
+                };
             }
-            FieldType::Custom { nullable: true } => compiler.custom_compare(
-                field,
-                ComparisonOperator::NotEqual,
-                &Value {
-                    text: "null".into(),
-                    quoted: false,
-                },
-            ),
-            FieldType::Jsonb => compiler.json_present(field),
-            _ => Ok(compiler.constant(true)),
-        };
-    }
-    if let FieldType::Custom { nullable } = field_type {
-        if !value.quoted && value.text == "null" {
-            ensure!(nullable, "field `{field}` is not nullable");
-            ensure!(
-                matches!(operator, Comparator::Equal | Comparator::NotEqual),
-                "null supports only = and != comparisons"
-            );
-        }
-        return compiler.custom_compare(field, comparison_operator(operator), value);
-    }
-    if matches!(field_type, FieldType::Jsonb) {
-        let json = if value.quoted {
-            if value.text.starts_with('[') || value.text.starts_with('{') {
-                serde_json::from_str(&value.text)
-                    .map_err(|error| anyhow::anyhow!("invalid JSON containment value: {error}"))?
-            } else {
-                serde_json::Value::String(value.text.clone())
-            }
-        } else {
-            serde_json::from_str(&value.text)
-                .unwrap_or_else(|_| serde_json::Value::String(value.text.clone()))
-        };
-        return if operator == Comparator::Has {
-            compiler.json_contains(field, json)
-        } else {
-            let operator = match operator {
-                Comparator::Equal => ComparisonOperator::Equal,
-                Comparator::NotEqual => ComparisonOperator::NotEqual,
-                Comparator::LessThan => ComparisonOperator::LessThan,
-                Comparator::LessThanOrEqual => ComparisonOperator::LessThanOrEqual,
-                Comparator::GreaterThan => ComparisonOperator::GreaterThan,
-                Comparator::GreaterThanOrEqual => ComparisonOperator::GreaterThanOrEqual,
-                Comparator::Has => unreachable!(),
-            };
-            compiler.json_compare(field, operator, json)
-        };
-    }
-    let value = match field_type {
-        FieldType::String { nullable } => {
-            if !value.quoted && value.text == "null" && nullable {
-                ensure!(
-                    matches!(operator, Comparator::Equal | Comparator::NotEqual),
-                    "null supports only = and != comparisons"
-                );
-                FilterLiteral::Null
-            } else {
-                if operator == Comparator::Has {
-                    return compiler.ilike(field, substring_pattern(&value.text));
-                }
-                if matches!(operator, Comparator::Equal | Comparator::NotEqual)
-                    && value.text.contains('*')
-                {
-                    let predicate = compiler.like(field, wildcard_pattern(&value.text))?;
-                    return Ok(if operator == Comparator::NotEqual {
-                        compiler.not(predicate)
-                    } else {
-                        predicate
-                    });
-                }
-                FilterLiteral::String(value.text.clone())
-            }
-        }
-        FieldType::Int32 | FieldType::NullableInt32 | FieldType::Int64 { .. } => {
-            let nullable = matches!(
-                field_type,
-                FieldType::NullableInt32 | FieldType::Int64 { nullable: true }
-            );
-            let wide = matches!(field_type, FieldType::Int64 { .. });
             if !value.quoted && value.text == "null" {
                 ensure!(nullable, "field `{field}` is not nullable");
                 ensure!(
                     matches!(operator, Comparator::Equal | Comparator::NotEqual),
                     "null supports only = and != comparisons"
                 );
-                FilterLiteral::Null
-            } else {
-                let bits = if wide { 64 } else { 32 };
-                ensure!(
-                    !value.quoted,
-                    "field `{field}` requires an unquoted signed {bits}-bit integer"
-                );
-                let number = value.text.parse::<i64>().map_err(|error| anyhow::anyhow!(
-                    "field `{field}` requires a signed {bits}-bit integer, received `{}`: {error}", value.text))?;
-                if wide {
-                    FilterLiteral::Int64(number)
-                } else {
-                    FilterLiteral::Int(i32::try_from(number).map_err(|_| anyhow::anyhow!(
-                        "field `{field}` requires a signed 32-bit integer, received `{}`: integer overflow", value.text))?)
-                }
             }
+            compiler.custom_compare(field, comparison_operator(operator), value)
         }
-        FieldType::Custom { .. } => unreachable!(),
-        FieldType::Jsonb => unreachable!(),
-    };
-    compiler.compare(field, comparison_operator(operator), value)
+    }
 }
 
 fn comparison_operator(operator: Comparator) -> ComparisonOperator {
@@ -346,22 +220,7 @@ fn comparison_operator(operator: Comparator) -> ComparisonOperator {
     }
 }
 
-fn wildcard_pattern(value: &str) -> String {
-    let mut pattern = String::new();
-    for character in value.chars() {
-        match character {
-            '*' => pattern.push('%'),
-            '%' | '_' | '\\' => {
-                pattern.push('\\');
-                pattern.push(character);
-            }
-            _ => pattern.push(character),
-        }
-    }
-    pattern
-}
-
-fn substring_pattern(value: &str) -> String {
+pub(crate) fn substring_pattern(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -373,346 +232,218 @@ fn substring_pattern(value: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Records backend operations without depending on Diesel or an application schema.
     #[derive(Debug, PartialEq, Eq)]
     enum Predicate {
-        Compare(String, ComparisonOperator, FilterLiteral),
-        Like(String, String),
-        ILike(String, String),
+        Native(String, Comparator, Value),
+        Custom(String, ComparisonOperator, Value),
+        Search(String, String),
         Constant(bool),
-        And(Box<Predicate>, Box<Predicate>),
-        Or(Box<Predicate>, Box<Predicate>),
-        Not(Box<Predicate>),
+        And(Box<Self>, Box<Self>),
+        Or(Box<Self>, Box<Self>),
+        Not(Box<Self>),
     }
 
-    struct TestCompiler {
-        text_fields: &'static [&'static str],
-    }
-
-    impl Default for TestCompiler {
-        fn default() -> Self {
-            Self {
-                text_fields: &["name", "nickname"],
-            }
-        }
-    }
+    struct TestCompiler(&'static [&'static str]);
 
     impl Aip160FilterCompiler for TestCompiler {
         type Predicate = Predicate;
 
-        fn compare(
+        fn native_compare(&self, field: &str, op: Comparator, value: &Value) -> Result<Predicate> {
+            Ok(Predicate::Native(field.into(), op, value.clone()))
+        }
+        fn custom_compare(
             &self,
             field: &str,
-            operator: ComparisonOperator,
-            value: FilterLiteral,
+            op: ComparisonOperator,
+            value: &Value,
         ) -> Result<Predicate> {
-            Ok(Predicate::Compare(field.to_owned(), operator, value))
+            Ok(Predicate::Custom(field.into(), op, value.clone()))
         }
-
         fn constant(&self, value: bool) -> Predicate {
             Predicate::Constant(value)
         }
-
         fn and(&self, left: Predicate, right: Predicate) -> Predicate {
             Predicate::And(Box::new(left), Box::new(right))
         }
-
         fn or(&self, left: Predicate, right: Predicate) -> Predicate {
             Predicate::Or(Box::new(left), Box::new(right))
         }
-
         fn not(&self, predicate: Predicate) -> Predicate {
             Predicate::Not(Box::new(predicate))
         }
-
         fn field_type(&self, field: &str) -> Result<FieldType> {
             match field {
-                "name" => Ok(FieldType::String { nullable: false }),
-                "nickname" => Ok(FieldType::String { nullable: true }),
-                "age" => Ok(FieldType::Int32),
+                "name" | "age" | "payload.details" => Ok(FieldType::Native),
+                "code" => Ok(FieldType::Custom { nullable: false }),
+                "optional" => Ok(FieldType::Custom { nullable: true }),
                 _ => bail!("unknown test field `{field}`"),
             }
         }
-
         fn text_fields(&self) -> &'static [&'static str] {
-            self.text_fields
+            self.0
         }
-
-        fn like(&self, field: &str, pattern: String) -> Result<Predicate> {
-            Ok(Predicate::Like(field.to_owned(), pattern))
-        }
-
         fn ilike(&self, field: &str, pattern: String) -> Result<Predicate> {
-            Ok(Predicate::ILike(field.to_owned(), pattern))
+            Ok(Predicate::Search(field.into(), pattern))
         }
     }
 
     fn compiled(source: &str) -> Predicate {
-        compile(source, &TestCompiler::default()).unwrap().unwrap()
+        compile(source, &TestCompiler(&["name"])).unwrap().unwrap()
     }
 
-    fn comparison(field: &str, operator: ComparisonOperator, value: FilterLiteral) -> Predicate {
-        Predicate::Compare(field.to_owned(), operator, value)
+    fn value(text: &str, quoted: bool) -> Value {
+        Value {
+            text: text.into(),
+            quoted,
+        }
     }
-
-    fn equal(field: &str, value: &str) -> Predicate {
-        comparison(
-            field,
-            ComparisonOperator::Equal,
-            FilterLiteral::String(value.to_owned()),
-        )
+    fn native(field: &str, op: Comparator, text: &str, quoted: bool) -> Predicate {
+        Predicate::Native(field.into(), op, value(text, quoted))
     }
-
-    fn like(field: &str, pattern: &str) -> Predicate {
-        Predicate::Like(field.to_owned(), pattern.to_owned())
+    fn custom(field: &str, op: ComparisonOperator, text: &str, quoted: bool) -> Predicate {
+        Predicate::Custom(field.into(), op, value(text, quoted))
     }
 
     #[test]
-    fn comparisons_dispatch_typed_values_and_operators() {
-        for (token, operator) in [
-            ("=", ComparisonOperator::Equal),
-            ("!=", ComparisonOperator::NotEqual),
-            ("<", ComparisonOperator::LessThan),
-            ("<=", ComparisonOperator::LessThanOrEqual),
-            (">", ComparisonOperator::GreaterThan),
-            (">=", ComparisonOperator::GreaterThanOrEqual),
+    fn native_handlers_receive_original_literals_and_all_operators() {
+        for (token, op) in [
+            ("=", Comparator::Equal),
+            ("!=", Comparator::NotEqual),
+            ("<", Comparator::LessThan),
+            ("<=", Comparator::LessThanOrEqual),
+            (">", Comparator::GreaterThan),
+            (">=", Comparator::GreaterThanOrEqual),
+            (":", Comparator::Has),
         ] {
-            for field in ["name", "nickname"] {
+            for (literal, text, quoted) in [
+                ("001", "001", false),
+                ("'001'", "001", true),
+                ("null", "null", false),
+                ("'*'", "*", true),
+                ("a.b", "a.b", false),
+            ] {
                 assert_eq!(
-                    compiled(&format!("{field}{token}Alice")),
-                    comparison(field, operator, FilterLiteral::String("Alice".into()))
+                    compiled(&format!("age{token}{literal}")),
+                    native("age", op, text, quoted)
                 );
             }
-            assert_eq!(
-                compiled(&format!("age{token}30")),
-                comparison("age", operator, FilterLiteral::Int(30))
-            );
         }
+        assert_eq!(
+            compiled("payload.details:*"),
+            native("payload.details", Comparator::Has, "*", false)
+        );
     }
 
     #[test]
-    fn precedence_and_negation_produce_the_expected_backend_tree() {
-        let expected = Predicate::And(
-            Box::new(equal("name", "A")),
-            Box::new(Predicate::Or(
-                Box::new(equal("nickname", "B")),
-                Box::new(equal("name", "C")),
-            )),
-        );
-        assert_eq!(compiled("name=A AND nickname=B OR name=C"), expected);
-        assert_eq!(compiled("name=A nickname=B OR name=C"), expected);
-        assert_eq!(
-            compiled("NOT (name=A OR nickname=B)"),
-            Predicate::Not(Box::new(Predicate::Or(
-                Box::new(equal("name", "A")),
-                Box::new(equal("nickname", "B"))
-            )))
-        );
-        for source in ["-name=A", "NOT name=A"] {
+    fn adapters_receive_literals_without_wildcard_or_numeric_conversion() {
+        for (source, text, quoted) in [
+            ("code=001", "001", false),
+            ("code='001'", "001", true),
+            ("code='a*b'", "a*b", true),
+            ("code='null'", "null", true),
+            ("code:'*'", "*", true),
+        ] {
             assert_eq!(
                 compiled(source),
-                Predicate::Not(Box::new(equal("name", "A")))
+                custom("code", ComparisonOperator::Equal, text, quoted)
             );
+        }
+        assert_eq!(
+            compiled("code>=100"),
+            custom("code", ComparisonOperator::GreaterThanOrEqual, "100", false)
+        );
+    }
+
+    #[test]
+    fn custom_null_and_presence_respect_nullability_and_quoting() {
+        assert_eq!(
+            compiled("optional=null"),
+            custom("optional", ComparisonOperator::Equal, "null", false)
+        );
+        for source in ["optional!=null", "optional:*"] {
+            assert_eq!(
+                compiled(source),
+                custom("optional", ComparisonOperator::NotEqual, "null", false)
+            );
+        }
+        assert_eq!(compiled("code:*"), Predicate::Constant(true));
+        assert_eq!(
+            compiled("optional='null'"),
+            custom("optional", ComparisonOperator::Equal, "null", true)
+        );
+        for source in ["code=null", "optional>null", "optional:null", "missing:*"] {
+            assert!(compile(source, &TestCompiler(&[])).is_err(), "{source}");
         }
     }
 
     #[test]
-    fn composite_arguments_apply_the_comparison_to_each_literal() {
+    fn composite_arguments_and_mixed_fields_preserve_boolean_structure() {
         assert_eq!(
-            compiled("name=(A OR B)"),
-            Predicate::Or(Box::new(equal("name", "A")), Box::new(equal("name", "B")))
-        );
-        assert_eq!(
-            compiled("name:(Central AND (Station OR Depot))"),
+            compiled("age>=(001 OR NOT '002') AND code=3"),
             Predicate::And(
-                Box::new(ilike("name", "%Central%")),
                 Box::new(Predicate::Or(
-                    Box::new(ilike("name", "%Station%")),
-                    Box::new(ilike("name", "%Depot%"))
+                    Box::new(native("age", Comparator::GreaterThanOrEqual, "001", false)),
+                    Box::new(Predicate::Not(Box::new(native(
+                        "age",
+                        Comparator::GreaterThanOrEqual,
+                        "002",
+                        true
+                    ))))
                 )),
+                Box::new(custom("code", ComparisonOperator::Equal, "3", false))
             )
         );
         assert_eq!(
-            compiled("name=(NOT A)"),
-            Predicate::Not(Box::new(equal("name", "A")))
+            compiled("name=A AND code=B OR code=C"),
+            Predicate::And(
+                Box::new(native("name", Comparator::Equal, "A", false)),
+                Box::new(Predicate::Or(
+                    Box::new(custom("code", ComparisonOperator::Equal, "B", false)),
+                    Box::new(custom("code", ComparisonOperator::Equal, "C", false))
+                ))
+            )
         );
     }
 
     #[test]
-    fn null_and_presence_checks_dispatch_the_expected_operations() {
-        assert_eq!(
-            compiled("nickname=null"),
-            comparison("nickname", ComparisonOperator::Equal, FilterLiteral::Null)
-        );
-        for source in ["nickname!=null", "nickname:*"] {
+    fn global_search_escapes_patterns_and_uses_only_declared_text_fields() {
+        for literal in ["true", "null", "001", "a.b", "*"] {
             assert_eq!(
-                compiled(source),
-                comparison(
-                    "nickname",
-                    ComparisonOperator::NotEqual,
-                    FilterLiteral::Null
-                )
-            );
-        }
-        for source in ["name:*", "age:*"] {
-            assert_eq!(compiled(source), Predicate::Constant(true));
-        }
-    }
-
-    #[test]
-    fn strings_preserve_literal_spelling_and_quoting() {
-        for (source, field, value) in [
-            ("name=001", "name", "001"),
-            ("name=true", "name", "true"),
-            ("name=null", "name", "null"),
-            ("nickname='null'", "nickname", "null"),
-            ("name=nickname", "name", "nickname"),
-            ("name=a.b", "name", "a.b"),
-            (r#"name="x' OR 1=1 --""#, "name", "x' OR 1=1 --"),
-        ] {
-            assert_eq!(compiled(source), equal(field, value));
-        }
-    }
-
-    #[test]
-    fn like_patterns_distinguish_wildcards_from_literal_substrings() {
-        for (source, pattern) in [
-            ("name='Central*'", "Central%"),
-            ("name='*Central'", "%Central"),
-            ("name='*Central*'", "%Central%"),
-            (r#"name="a%_*b\\c""#, "a\\%\\_%b\\\\c"),
-        ] {
-            assert_eq!(compiled(source), like("name", pattern));
-        }
-        assert_eq!(
-            compiled("name!='Central*'"),
-            Predicate::Not(Box::new(like("name", "Central%")))
-        );
-    }
-
-    fn ilike(field: &str, pattern: &str) -> Predicate {
-        Predicate::ILike(field.to_owned(), pattern.to_owned())
-    }
-
-    #[test]
-    fn substring_search_dispatches_case_insensitive_patterns() {
-        for (source, pattern) in [
-            ("name:Central", "%Central%"),
-            ("name:'*'", "%*%"),
-            ("name:'50%_off'", "%50\\%\\_off%"),
-            (r#"name:'a\\b'"#, r"%a\\b%"),
-        ] {
-            assert_eq!(compiled(source), ilike("name", pattern));
-        }
-        assert_eq!(
-            compiled("NOT nickname:Ali"),
-            Predicate::Not(Box::new(ilike("nickname", "%Ali%")))
-        );
-    }
-
-    #[test]
-    fn global_search_uses_only_backend_declared_text_fields() {
-        for literal in [
-            "Central",
-            "true",
-            "false",
-            "null",
-            "001",
-            "2.997e9",
-            "some.domain",
-        ] {
-            let expected = Predicate::Or(
-                Box::new(ilike("name", &format!("%{literal}%"))),
-                Box::new(ilike("nickname", &format!("%{literal}%"))),
-            );
-            assert_eq!(compiled(literal), expected);
-            assert_eq!(compiled(&format!("'{literal}'")), expected);
-        }
-        let backend = TestCompiler {
-            text_fields: &["nickname"],
-        };
-        assert_eq!(
-            compile("Central", &backend).unwrap(),
-            Some(ilike("nickname", "%Central%"))
-        );
-        let backend = TestCompiler { text_fields: &[] };
-        assert_eq!(
-            compile("Central", &backend).unwrap_err().to_string(),
-            "global search is not supported"
-        );
-    }
-
-    #[test]
-    fn integer_conversion_is_exact_and_range_checked() {
-        for (literal, value) in [
-            ("-2147483648", i32::MIN),
-            ("2147483647", i32::MAX),
-            ("0", 0),
-            ("001", 1),
-            ("-30", -30),
-        ] {
-            assert_eq!(
-                compiled(&format!("age={literal}")),
-                comparison("age", ComparisonOperator::Equal, FilterLiteral::Int(value))
+                compiled(literal),
+                Predicate::Search("name".into(), format!("%{literal}%"))
             );
         }
         assert_eq!(
-            compiled("age:30"),
-            comparison("age", ComparisonOperator::Equal, FilterLiteral::Int(30))
+            compiled(r"'50%_off\\path'"),
+            Predicate::Search("name".into(), r"%50\%\_off\\path%".into())
         );
-        for value in [
-            "2147483648",
-            "-2147483649",
-            "9007199254740993",
-            "1.5",
-            "1e3",
-            "true",
-            "null",
-            "NaN",
-            "'30'",
-        ] {
-            assert!(
-                compile(&format!("age={value}"), &TestCompiler::default()).is_err(),
-                "{value}"
-            );
-        }
+        assert!(compile("search", &TestCompiler(&[])).is_err());
+        assert_eq!(
+            compile("search", &TestCompiler(&["name", "other"])).unwrap(),
+            Some(Predicate::Or(
+                Box::new(Predicate::Search("name".into(), "%search%".into())),
+                Box::new(Predicate::Search("other".into(), "%search%".into()))
+            ))
+        );
     }
 
     #[test]
-    fn invalid_fields_values_and_unsupported_syntax_are_rejected() {
+    fn invalid_fields_and_nested_restrictions_fail_before_dispatch() {
         for source in [
             "unknown=A",
-            "point.x=1",
-            "resource.name=A",
-            "name.0=A",
+            "unknown=(A OR B)",
             "'name'=A",
             "42=name",
-            "regex(name, 'a')",
+            "name=(code=A)",
             "name=helper()",
-            "name=(other=A)",
-            "nickname>null",
-            "nickname:null",
+            "regex(name, 'a')",
+            "name='a'.b",
             "name == 'A'",
-            "name=A && nickname=B",
-            "name.contains('A')",
         ] {
-            assert!(
-                compile(source, &TestCompiler::default()).is_err(),
-                "unexpectedly accepted: {source}"
-            );
+            assert!(compile(source, &TestCompiler(&[])).is_err(), "{source}");
         }
-        assert_eq!(
-            compile("missing:*", &TestCompiler::default())
-                .unwrap_err()
-                .to_string(),
-            "unknown test field `missing`"
-        );
-    }
-
-    #[test]
-    fn empty_filters_return_no_predicate() {
         for source in ["", " \n "] {
-            assert_eq!(compile(source, &TestCompiler::default()).unwrap(), None);
+            assert_eq!(compile(source, &TestCompiler(&[])).unwrap(), None);
         }
     }
 }

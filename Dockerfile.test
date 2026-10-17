@@ -1,0 +1,4 @@
+FROM rust:1.99.1-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev default-libmysqlclient-dev pkg-config && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+ENV CARGO_TARGET_DIR=/build RUSTUP_TOOLCHAIN=1.99.1
