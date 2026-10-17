@@ -3,7 +3,7 @@
 Parse AIP-160 filter strings, validate them against model fields, and compile
 them into typed, parameterized Diesel predicates.
 
-**Status: beta (`0.1.0-beta.1`).** Both crates share this prerelease version.
+**Status: beta (`0.1.0-beta.4`).** Both crates share this prerelease version.
 The public API and filter behavior may change between beta releases. Pin the
 exact version for reproducible integrations and review changes before upgrading.
 
@@ -19,7 +19,7 @@ Enable one database backend:
 
 ```toml
 [dependencies]
-diesel-aip-160 = { version = "=0.1.0-beta.1", features = ["sqlite"] }
+diesel-aip-160 = { version = "=0.1.0-beta.4", features = ["sqlite"] }
 diesel = { version = "2", default-features = false, features = ["sqlite"] }
 ```
 
@@ -83,7 +83,7 @@ SQL enums and composite SQL types still use adapters.
 Enable optional Rust representation integrations as needed:
 
 ```toml
-diesel-aip-160 = { version = "=0.1.0-beta.3", features = ["postgres", "chrono", "uuid", "numeric", "ipnet-address"] }
+diesel-aip-160 = { version = "=0.1.0-beta.4", features = ["postgres", "chrono", "uuid", "numeric", "ipnet-address"] }
 ```
 
 `chrono`, `time`, `uuid`, `numeric` (BigDecimal), `ipnet-address`, and
@@ -456,12 +456,13 @@ let predicate = diesel_aip_160::compiler::compile(
 ```
 
 For a custom backend, implement `Aip160FilterCompiler` with your own predicate
-type. Supply field types and searchable text fields, typed comparisons, LIKE
-operations, constants, and logical composition. Implement `like` for wildcard
-equality and `ilike` for case-insensitive substring and global searches; custom
-compiler implementations must now supply `ilike`. The compiler parses and
-validates the filter before dispatching these operations. JSONB methods have
-default implementations that return unsupported-operation errors.
+type. Supply field types, searchable text fields, constants, and logical
+composition. Return `FieldType::Native` for built-in fields and implement
+`native_compare` to interpret the original `parser::Comparator` and
+`parser::Value`, including quoting, wildcard equality, containment, and NULL
+semantics. Implement `ilike` for global substring searches. Application-defined
+fields use `FieldType::Custom { nullable }` and `custom_compare`. See the
+[changelog](CHANGELOG.md) for beta migration notes.
 
 ## Run examples and tests
 
