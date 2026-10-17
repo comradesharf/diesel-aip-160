@@ -16,6 +16,9 @@ diesel::table! {
         id -> Integer,
         name -> Text,
         note -> Nullable<Text>,
+        small -> Nullable<Integer>,
+        wide -> BigInt,
+        order -> Nullable<BigInt>,
     }
 }
 
@@ -26,6 +29,9 @@ struct Record {
     id: i32,
     name: String,
     note: Option<String>,
+    small: Option<i32>,
+    wide: i64,
+    order: Option<i64>,
 }
 
 fn sql(filter: &str) -> String {
@@ -103,7 +109,7 @@ fn substring_and_global_search_lower_both_operands_only() {
 fn sqlite_executes_case_insensitive_search_with_literal_patterns_and_nulls() {
     let mut connection = diesel::sqlite::SqliteConnection::establish(":memory:").unwrap();
     diesel::sql_query(
-        "CREATE TABLE records (id INTEGER PRIMARY KEY, name TEXT NOT NULL, note TEXT)",
+        "CREATE TABLE records (id INTEGER PRIMARY KEY, name TEXT NOT NULL, note TEXT, small INTEGER, wide BIGINT NOT NULL DEFAULT 0, \"order\" BIGINT)",
     )
     .execute(&mut connection)
     .unwrap();
@@ -146,4 +152,56 @@ fn sqlite_executes_case_insensitive_search_with_literal_patterns_and_nulls() {
             .unwrap();
         assert_eq!(ids, expected, "{filter}");
     }
+}
+
+#[test]
+fn integer_ranges_nulls_and_parameter_binding() {
+    for field in ["id", "small"] {
+        for value in [i32::MIN as i64, i32::MAX as i64] {
+            assert!(sql(&format!("{field}={value}")).ends_with(&format!("-- binds: [{value}]")));
+        }
+        for value in ["2147483648", "-2147483649"] {
+            let error = Record::compile_filter(&format!("{field}={value}"))
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                error.contains("32-bit") && error.contains("overflow"),
+                "{error}"
+            );
+        }
+    }
+    for field in ["wide", "order"] {
+        for value in [i64::MIN, i64::MAX, 4294967295, 9007199254740993] {
+            for operator in ["=", "!=", "<", "<=", ">", ">="] {
+                let query = sql(&format!("{field}{operator}{value}"));
+                assert!(query.ends_with(&format!("-- binds: [{value}]")), "{query}");
+            }
+        }
+        for value in [
+            "9223372036854775808",
+            "-9223372036854775809",
+            "'5'",
+            "1.5",
+            "1e3",
+        ] {
+            assert!(Record::compile_filter(&format!("{field}={value}")).is_err());
+        }
+    }
+    for field in ["small", "order"] {
+        assert!(sql(&format!("{field}=null")).contains("IS NULL"));
+        assert!(sql(&format!("{field}!=null")).contains("IS NOT NULL"));
+        assert!(sql(&format!("{field}:*")).contains("IS NOT NULL"));
+        for operator in ["<", "<=", ">", ">="] {
+            assert!(Record::compile_filter(&format!("{field}{operator}null")).is_err());
+        }
+    }
+    assert!(Record::compile_filter("wide=null").is_err());
+    let query = sql("(small=null OR small>=-2147483648) AND NOT order<4294967295");
+    assert!(query.contains(" OR ") && query.contains(" AND ") && query.contains("NOT"));
+    assert!(
+        query.ends_with("-- binds: [-2147483648, 4294967295]"),
+        "{query}"
+    );
+    assert!(!query.contains("COALESCE"));
 }

@@ -121,6 +121,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             "Aip160Filter requires named fields",
         ));
     };
+    let mut custom_comparisons = Vec::new();
     let mut comparisons = Vec::new();
     let mut types = Vec::new();
     let mut likes = Vec::new();
@@ -132,24 +133,25 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut json_presences = Vec::new();
     let mut jsonb_columns = Vec::new();
     for field in &fields.named {
-        let mut skip = false;
-        for attribute in &field.attrs {
-            if attribute.path().is_ident("aip160") {
-                attribute.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("skip") {
-                        skip = true;
-                        Ok(())
-                    } else {
-                        Err(meta.error("expected skip"))
-                    }
-                })?;
-            }
-        }
-        if skip {
+        let (skip, adapter) = field_options(field)?;
+        if skip || adapter.is_some() {
             continue;
         }
         let (ty, _) = unwrap_option(&field.ty);
-        if !is_type(ty, "String") && !is_type(ty, "i32") {
+        if [
+            "bool", "i8", "i16", "u8", "u16", "u32", "u64", "i128", "u128", "isize", "usize",
+            "f32", "f64", "Vec",
+        ]
+        .iter()
+        .any(|name| is_type(ty, name))
+            || !matches!(ty, Type::Path(_))
+        {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "unsupported Aip160Filter field type; use #[aip160(adapter = MyAdapter)] for custom filtering or #[aip160(skip)] to exclude it",
+            ));
+        }
+        if !is_type(ty, "String") && !is_type(ty, "i32") && !is_type(ty, "i64") {
             jsonb_columns.push((field.ident.as_ref().unwrap().clone(), ty.clone()));
         }
     }
@@ -164,19 +166,21 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         json_presences.push(quote!(if let Some(path) = #path { return Ok(::diesel_aip_160::diesel_helpers::jsonb_presence(#table::#ident, path)); }));
     }
     for field in &fields.named {
-        if field
-            .attrs
-            .iter()
-            .any(|attr| attr.path().is_ident("aip160"))
-        {
+        let (skip, adapter) = field_options(field)?;
+        if skip {
             continue;
         }
         let ident = field.ident.as_ref().unwrap();
         let name = ident.to_string();
         let (ty, nullable) = unwrap_option(&field.ty);
+        if let Some(adapter) = adapter {
+            types.push(quote!(#name => Ok(::diesel_aip_160::compiler::FieldType::Custom { nullable: #nullable }),));
+            custom_comparisons.push(quote!(#name => <#adapter as ::diesel_aip_160::diesel_helpers::FieldAdapter<#table::#ident>>::compare(#table::#ident, operator, value),));
+            continue;
+        }
         let kind = if is_type(ty, "String") {
             "string"
-        } else if is_type(ty, "i32") {
+        } else if is_type(ty, "i32") || is_type(ty, "i64") {
             "integer"
         } else {
             continue;
@@ -217,11 +221,28 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 )),
             });
         } else {
-            types.push(quote!(#name => Ok(::diesel_aip_160::compiler::FieldType::Int32),));
+            let (field_type, literal, helper) = if is_type(ty, "i64") {
+                (
+                    quote!(Int64 { nullable: #nullable }),
+                    quote!(Int64),
+                    quote!(compare_bigint_column),
+                )
+            } else if nullable {
+                (
+                    quote!(NullableInt32),
+                    quote!(Int),
+                    quote!(compare_integer_column),
+                )
+            } else {
+                (quote!(Int32), quote!(Int), quote!(compare_integer_column))
+            };
+            types.push(quote!(#name => Ok(::diesel_aip_160::compiler::FieldType::#field_type),));
             comparisons.push(quote! {
-                (#name, ::diesel_aip_160::compiler::FilterLiteral::Int(value)) =>
-                    ::diesel_aip_160::diesel_helpers::compare_integer_column(#column, operator, Some(value)),
-                (#name, value) => ::diesel_aip_160::anyhow::bail!("field `{}` requires a signed 32-bit integer value, received {value:?}", #name),
+                (#name, ::diesel_aip_160::compiler::FilterLiteral::#literal(value)) =>
+                    ::diesel_aip_160::diesel_helpers::#helper(#column, operator, Some(value)),
+                (#name, ::diesel_aip_160::compiler::FilterLiteral::Null) =>
+                    ::diesel_aip_160::diesel_helpers::#helper(#column, operator, None),
+                (#name, value) => ::diesel_aip_160::anyhow::bail!("field `{}` requires an integer value, received {value:?}", #name),
             });
         }
     }
@@ -242,6 +263,10 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     #(#comparisons)*
                     _ => ::diesel_aip_160::anyhow::bail!("unknown or unsupported filter field `{field}`"),
                 }
+            }
+            fn custom_compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator,
+                value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+                match field { #(#custom_comparisons)* _ => ::diesel_aip_160::anyhow::bail!("unknown adapter field `{field}`"), }
             }
             fn constant(&self, value: bool) -> Self::Predicate {
                 Box::new(value.into_sql::<::diesel_aip_160::diesel::sql_types::Bool>())
@@ -280,6 +305,36 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
     })
+}
+
+fn field_options(field: &syn::Field) -> syn::Result<(bool, Option<syn::Path>)> {
+    let mut skip = false;
+    let mut adapter = None;
+    for attribute in &field.attrs {
+        if attribute.path().is_ident("aip160") {
+            attribute.parse_nested_meta(|meta| {
+                if meta.path.is_ident("skip") {
+                    skip = true;
+                    Ok(())
+                } else if meta.path.is_ident("adapter") {
+                    if adapter.is_some() {
+                        return Err(meta.error("duplicate adapter"));
+                    }
+                    adapter = Some(meta.value()?.parse()?);
+                    Ok(())
+                } else {
+                    Err(meta.error("expected skip or adapter = path::Adapter"))
+                }
+            })?;
+        }
+    }
+    if skip && adapter.is_some() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "skip and adapter cannot be combined",
+        ));
+    }
+    Ok((skip, adapter))
 }
 
 fn unwrap_option(ty: &Type) -> (&Type, bool) {
@@ -364,6 +419,47 @@ mod tests {
         assert!(output.contains("FieldType::Int32"));
         assert!(output.contains("json_path::<Details>(field,\"details\")"));
         assert!(!output.contains("\"ignored\""));
+    }
+
+    #[test]
+    fn adapters_and_integer_widths_are_explicit() {
+        let input = syn::parse_quote! {
+            #[diesel(table_name = records)]
+            struct Record {
+                small: Option<i32>,
+                large: i64,
+                optional: Option<i64>,
+                #[aip160(adapter = crate::CodeAdapter)]
+                code: Code,
+            }
+        };
+        let output = compact(expand(input).unwrap());
+        assert!(output.contains("FieldType::NullableInt32"));
+        assert!(output.contains("FieldType::Int64{nullable:false}"));
+        assert!(output.contains("FieldType::Int64{nullable:true}"));
+        assert!(output.contains("FieldAdapter<records::code>"));
+        assert!(!output.contains("json_path"));
+    }
+
+    #[test]
+    fn unsupported_types_and_attributes_have_actionable_errors() {
+        let input = syn::parse_quote! {
+            #[diesel(table_name = records)]
+            struct Record { enabled: bool }
+        };
+        let error = expand(input).unwrap_err().to_string();
+        assert!(error.contains("adapter") && error.contains("skip"));
+        for attributes in [
+            quote!(skip, adapter = Adapter),
+            quote!(adapter = A, adapter = B),
+            quote!(unknown),
+        ] {
+            let input = syn::parse_quote! {
+                #[diesel(table_name = records)]
+                struct Record { #[aip160(#attributes)] code: Code }
+            };
+            assert!(expand(input).is_err());
+        }
     }
 
     #[test]

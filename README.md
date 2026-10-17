@@ -72,7 +72,8 @@ Values are bound as SQL parameters. An empty or whitespace-only filter returns
 `Ok(None)`, so the query can omit `.filter(...)`. Invalid syntax, unknown fields,
 and incompatible values return an error.
 
-The derive supports `String`, `Option<String>`, and `i32` fields. Exclude fields
+The derive supports `String`, `Option<String>`, `i32`, `Option<i32>`, `i64`,
+and `Option<i64>` fields. Exclude fields
 that should not be filterable with `#[aip160(skip)]`. PostgreSQL also supports
 JSONB fields, described below.
 
@@ -97,8 +98,12 @@ These examples use the `Record` model above:
 | `NOT (name=Alice OR name=Bob)` | Negate a group |
 
 Supported comparison operators are `=`, `!=`, `<`, `<=`, `>`, `>=`, and `:`.
-Integer `:` behaves as equality. Integers must be unquoted signed 32-bit decimal
-values; quoted numbers, fractions, and out-of-range values are rejected.
+Integer `:` behaves as equality. Integers must be unquoted signed decimal
+values within the field's 32-bit or 64-bit range; quoted numbers, fractions,
+and overflow are rejected. `i64` accepts the full uint32 range, including
+`4294967295`, without precision loss. Nullable integers support `=null`,
+`!=null`, and `:*`; ordering against NULL is rejected. Other comparisons and
+logical negation retain SQL three-valued NULL semantics.
 
 Logical operators use uppercase `AND`, `OR`, and `NOT`; adjacent expressions
 also imply AND. A leading `-` can negate an expression. **OR binds more tightly
@@ -120,7 +125,7 @@ Text comparisons (`=`, `!=`, and ordering) and `*` wildcard equality retain
 their existing SQL operator and collation behavior; they are not normalized
 with `LOWER`. NULL and presence checks and JSONB containment are unchanged.
 
-Unquoted `null` has NULL semantics only for nullable text; `note="null"`
+Unquoted `null` has NULL semantics for nullable scalar fields; `note="null"`
 matches the literal string instead. SQL NULL behavior still applies when
 negating predicates over nullable columns.
 
@@ -173,6 +178,80 @@ keys are needed. `Aip160Jsonb` supports field-level `#[serde(rename = "...")]`;
 struct-level `rename_all` is rejected. JSONB filtering is available only with
 PostgreSQL. See the [JSONB tests](diesel-aip-160/tests/derive.rs) for a complete
 schema and query examples.
+
+## Custom fields and PostgreSQL enums
+
+Select an application adapter explicitly; enum labels are never automatically
+interpreted as numbers or compared in numeric order:
+
+```rust,ignore
+#[derive(Aip160Filter)]
+#[diesel(table_name = routes)]
+struct Route {
+    #[aip160(adapter = NumericRoute)]
+    route_type: RouteType,
+    #[aip160(adapter = ProtobufPickup)]
+    continuous_pickup: Pickup,
+    order: Option<i64>,
+}
+```
+
+Implement `diesel_helpers::FieldAdapter<Column>` for the adapter. Its
+`compare(column, ComparisonOperator, &parser::Value)` returns
+`anyhow::Result<Predicate<Column::Table>>`. The column is the statically
+registered Diesel column; `Value` preserves literal text and quoting. Validate
+and map the literal before building typed Diesel expressions. Adapters can
+reject unsupported operators. `:` maps to equality for custom fields; text
+wildcard and substring handling never applies. Custom fields are excluded from
+global text search, and unknown fields or traversals are rejected.
+
+For nullable adapter fields, the compiler allows unquoted `null` only with
+`=`/`!=`, and sends `:*` as `!=null`. The adapter must emit `IS NULL`/`IS NOT
+NULL` for these requests. Nonnullable `:*` is constant true. Quoted `"null"`
+remains an ordinary adapter literal. Compare nullable values with Diesel's
+`assume_not_null()` expression wrapper when needed; it changes Rust typing
+without changing SQL NULL semantics.
+
+The complete, compiling [PostgreSQL enum example](diesel-aip-160/examples/postgres_enums.rs)
+shows numeric route labels `3`, `100`, `1702`, nullable BIGINT `order`, and
+application mappings from protobuf pickup/drop-off literals `1`–`4` to stored
+GTFS labels `0`–`3`. The numeric adapter explicitly casts enum → text → BIGINT
+using a fixed application SQL expression, so `3 < 100 < 1702` regardless of
+PostgreSQL enum declaration order. The pickup adapter binds a value of the
+custom PostgreSQL SQL type and deliberately rejects ordering. For declaration
+ordering instead, an adapter can use typed enum `.lt()`/`.gt()` expressions.
+
+All values must be bound parameters. Never concatenate user literals, labels,
+paths, or field names into SQL. Adapter SQL expressions are trusted application
+code, and the application owns cast validity for its entire stored enum domain.
+For example, a numeric adapter is inappropriate for enums with nonnumeric
+stored labels. The library contains no GTFS mappings or enum ordering policy.
+
+Existing JSONB structs continue to opt in with `Aip160Jsonb`/`JsonbPath` (and
+`serde_json::Value` remains supported). Unknown custom types produce an
+unsupported-field diagnostic pointing to `adapter`, `skip`, or `Aip160Jsonb`;
+unsupported primitive fields are rejected directly by the derive.
+
+Run the enum SQL-generation tests without a database:
+
+```sh
+cargo test -p diesel-aip-160 --features postgres --all-targets
+cargo run -p diesel-aip-160 --features postgres --example postgres_enums
+```
+
+An optional ignored integration test executes Diesel queries against PostgreSQL
+with deliberately reordered enum declarations. It creates session-local types
+and a temporary table only. It requires native libpq and an explicitly selected
+test database:
+
+```sh
+AIP160_TEST_DATABASE_URL=postgres://user:password@localhost/test_db \
+  cargo test -p diesel-aip-160 --features postgres-integration \
+  --example postgres_enums postgres_executes -- --ignored
+```
+
+`postgres` continues to enable SQL generation without native libraries;
+`postgres-integration` additionally enables Diesel's PostgreSQL connection driver.
 
 ## Compiler API
 
