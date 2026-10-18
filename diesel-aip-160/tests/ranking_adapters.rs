@@ -19,11 +19,13 @@ diesel::table! { places (id) { id -> Integer, label -> Text } }
 diesel::define_sql_function! { fn abs(value: diesel::sql_types::Integer) -> diesel::sql_types::Integer; }
 struct Distance;
 impl SearchAdapter<places::table> for Distance {
-    fn search(_: &Value) -> diesel_aip_160::anyhow::Result<Predicate<places::table>> {
+    fn search(
+        _: &::diesel_aip_160::search::SearchTerm,
+    ) -> diesel_aip_160::anyhow::Result<Predicate<places::table>> {
         Ok(Box::new(places::id.ge(0)))
     }
     fn search_query(
-        value: &Value,
+        value: &::diesel_aip_160::search::SearchTerm,
     ) -> diesel_aip_160::anyhow::Result<CompiledQueryFilter<places::table>> {
         let center: i32 = value.text.parse()?;
         Ok(QueryFilter {
@@ -54,7 +56,9 @@ impl FieldAdapter<places::id> for Distance {
         operator: diesel_aip_160::compiler::ComparisonOperator,
         value: &Value,
     ) -> diesel_aip_160::anyhow::Result<CompiledQueryFilter<places::table>> {
-        let mut result = <Self as SearchAdapter<places::table>>::search_query(value)?;
+        let mut result = <Self as SearchAdapter<places::table>>::search_query(
+            &diesel_aip_160::search::SearchTerm::from_literal(value)?,
+        )?;
         result.predicate = Self::compare(column, operator, value)?;
         Ok(result)
     }

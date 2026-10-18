@@ -170,7 +170,13 @@ conflicts with all search/adapter options; duplicate or unknown options are
 errors. Built-in MySQL/SQLite configurations and PostgreSQL search under another
 backend are rejected. Other field types need a custom search adapter.
 Quoted built-in searches are PostgreSQL lexeme phrases; unquoted values are
-ordinary terms. Presence, NULL checks, equality, and containment are unchanged.
+ordinary terms. The explicit dialect extension `title:sen*` enables lexeme prefix
+search on PostgreSQL; `title:*` still means presence. `SearchAdapter` receives
+`search::SearchTerm` and must set `SUPPORTS_PREFIX = true` to accept prefixes.
+Derived `compile_search(&Expression)` accepts typed terms from
+`search::autocomplete` / `autocomplete_field`. See the runtime README for
+normalization, invalid wildcard handling, index alignment, and migration details.
+Presence, NULL checks, equality, and containment are unchanged.
 See the [search guide](../diesel-aip-160/README.md#opt-in-full-text-search) for complete examples,
 database requirements, NULL semantics, and custom adapter responsibilities.
 

@@ -5,6 +5,29 @@ public APIs and filter behavior; pin the exact version when upgrading.
 
 ## Unreleased
 
+### Added
+
+- Explicit trailing-wildcard search extension: `field:sen*` and global `sen*`
+  match normalized lexeme prefixes, including single characters and route codes.
+- Typed `SearchTerm` / `SearchKind`, `autocomplete` / `autocomplete_field`,
+  `Expression::Search`, `compile_ast` / `compile_query_ast`, and derived
+  `compile_search` for literal user text without filter-syntax assembly.
+- PostgreSQL bound, configuration-aware prefix normalization with escaped
+  tsquery serialization, unchanged indexed target expressions, shared ranking
+  semantics, and execution/GIN eligibility tests using EXPLAIN.
+
+### Breaking changes
+
+- Search hooks, adapters, and PostgreSQL helpers now take `&SearchTerm` rather
+  than `&Value`. Comparison hooks retain `Value`. Adapters must explicitly enable
+  `SUPPORTS_PREFIX`; custom compilers expose `supports_prefix`.
+- Unsupported wildcard placements, empty/punctuation-only prefixes, and prefix
+  searches on unsupported fields/adapters fail clearly. Global prefixes require
+  every participating field to support prefixes. Quoted stars stay literal;
+  equality/wildcard equality/presence retain their meanings.
+- Exhaustive AST matches must handle `Expression::Search`. See the runtime
+  README's “Migrating search adapters and compilers” section for migration.
+
 ## 0.1.0-beta.7 — 2026-10-18
 
 ### Added

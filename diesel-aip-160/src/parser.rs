@@ -1,6 +1,7 @@
 //! AIP-160 syntax, independent of field types and the database backend.
 //!
 //! Follows <https://google.aip.dev/assets/misc/ebnf-filtering.txt>.
+//! The compiler supports an explicit trailing-wildcard search dialect extension.
 //! OR binds more tightly than both explicit AND and whitespace conjunctions.
 
 use anyhow::{Result, bail, ensure};
@@ -15,6 +16,11 @@ pub const MAX_NESTING: usize = 32;
 /// Parsed Boolean structure, before field and literal validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expression {
+    /// Typed search constructed without parsing filter syntax.
+    Search {
+        field: Option<String>,
+        term: crate::search::SearchTerm,
+    },
     /// Explicit or whitespace conjunction.
     And(Vec<Expression>),
     /// Disjunction; binds more tightly than conjunction in AIP-160.
@@ -163,7 +169,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>> {
                             .next()
                             .ok_or_else(|| anyhow::anyhow!("unfinished escape at byte {offset}"))?;
                         text.push(match escaped {
-                            '\\' | '\'' | '"' => escaped,
+                            '\\' | '\'' | '"' | '*' => escaped,
                             'n' => '\n',
                             'r' => '\r',
                             't' => '\t',
@@ -622,5 +628,30 @@ mod tests {
         assert!(parse_filter(&empty_calls).is_err());
         let at_limit = format!("{}a{}", "(".repeat(MAX_NESTING), ")".repeat(MAX_NESTING));
         assert_eq!(parse(&at_limit), parse("a"));
+    }
+}
+
+#[cfg(test)]
+mod search_literal_tests {
+    use super::*;
+    use crate::search::{SearchKind, SearchTerm};
+    #[test]
+    fn asterisk_protection_survives_parsing() {
+        for (source, text, kind) in [
+            ("sen*", "sen", SearchKind::Prefix),
+            (r#""sen*""#, "sen*", SearchKind::Phrase),
+            (r#""sen\*""#, "sen*", SearchKind::Phrase),
+            (r#""foo\\bar*""#, r"foo\bar*", SearchKind::Phrase),
+        ] {
+            let Expression::Global(Comparable::Member(parts)) =
+                parse_filter(source).unwrap().unwrap()
+            else {
+                panic!()
+            };
+            let term = SearchTerm::from_literal(&parts[0]).unwrap();
+            assert_eq!(term.text, text);
+            assert_eq!(term.kind, kind);
+        }
+        assert!(parse_filter(r"sen\*").is_err());
     }
 }
