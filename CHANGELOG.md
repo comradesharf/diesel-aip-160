@@ -5,6 +5,8 @@ public APIs and filter behavior; pin the exact version when upgrading.
 
 ## Unreleased
 
+## 0.1.0-beta.6 — 2026-10-18
+
 ### Added
 
 - Default `field_search` and `global_search` compiler hooks receive the original
@@ -21,6 +23,20 @@ public APIs and filter behavior; pin the exact version when upgrading.
   unsupported; comparison, presence, and nontext containment behavior remains.
 - Compiler, derive, SQL-binding, adapter, and database execution tests, plus a
   complete PostgreSQL search example and database setup documentation.
+
+### Migration from beta.5
+
+- Update both crates together to `0.1.0-beta.6` before using the new search
+  attributes; generated search code requires the matching runtime hooks.
+- Existing models and custom compilers retain substring search by default.
+  `field_search` and `global_search` have default implementations, so existing
+  compiler implementations do not need new methods.
+- PostgreSQL full-text search is opt-in. Create the matching search expression
+  index or stored vector in your application, and use the same explicit text
+  search configuration for indexing and queries. Quoted search literals use
+  phrase semantics instead of substring semantics on configured fields.
+- MySQL and SQLite applications can use custom search adapters; built-in
+  full-text search attributes support PostgreSQL only.
 
 ## 0.1.0-beta.5 — 2026-10-18
 
