@@ -170,3 +170,30 @@ fn independent_search_and_comparison_adapters_can_coexist() {
     }
     assert!(CustomDocument::compile_filter("id:null").is_err());
 }
+
+#[test]
+fn existing_adapters_need_no_rank_implementation() {
+    for source in [
+        "title:001",
+        "'diesel engine'",
+        "NOT title:(a OR b)",
+        "title:*",
+        "id=3",
+    ] {
+        let legacy = Document::compile_filter(source).unwrap().unwrap();
+        let query = Document::compile_query_filter(source).unwrap().unwrap();
+        assert!(query.signals.is_empty());
+        assert_eq!(
+            diesel::debug_query::<Backend, _>(&documents::table.filter(legacy)).to_string(),
+            diesel::debug_query::<Backend, _>(&documents::table.filter(query.predicate))
+                .to_string()
+        );
+    }
+    assert!(
+        GlobalDocument::compile_query_filter("diesel")
+            .unwrap()
+            .unwrap()
+            .signals
+            .is_empty()
+    );
+}

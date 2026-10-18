@@ -33,15 +33,18 @@ pub fn derive_aip160_pg_enum(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Generate a typed filter compiler and a `compile_filter` method for a Diesel model.
+/// Generate a typed filter compiler with `compile_filter` and opt-in
+/// `compile_query_filter` methods for a Diesel model.
 ///
 /// Use `#[diesel(table_name = ...)]` to specify the table and `#[aip160(skip)]`
 /// to exclude fields from filtering. Field search opts in with
 /// `#[aip160(search(postgres, configuration = "english"))]`, optionally adding
 /// `vector = table::document` for a stored `search::postgres::TsVector` target.
-/// Built-in search requires PostgreSQL and String/Option<String>; quoted values
+/// Built-in search requires PostgreSQL and `String`/`Option<String>`; quoted values
 /// are lexeme phrases and unquoted values are plain terms. Database setup is
-/// application-owned. Other backends require custom search adapters.
+/// application-owned. Opt-in query compilation emits typed relevance signals;
+/// selecting and prioritizing ordering remains explicit. Other backends require
+/// custom search adapters.
 /// Field `#[aip160(search_adapter = MySearch)]` and model
 /// `#[aip160(global_search_adapter = MySearch)]` select an independent
 /// `diesel_helpers::SearchAdapter<Table>`. Global search otherwise ORs field

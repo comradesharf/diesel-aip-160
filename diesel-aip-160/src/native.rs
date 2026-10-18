@@ -4,20 +4,15 @@ use crate::compiler::{FieldType, substring_pattern};
 use crate::diesel_helpers::Predicate;
 use crate::parser::{Comparator, Value};
 
+use crate::diesel_helpers::Backend;
 #[cfg(not(feature = "postgres"))]
 use anyhow::bail;
 use anyhow::{Result, ensure};
 use diesel::expression::{
     AppearsOnTable, Expression, SelectableExpression, ValidGrouping, is_aggregate::No,
 };
-#[cfg(feature = "mysql")]
-use diesel::mysql::Mysql as Backend;
-#[cfg(feature = "postgres")]
-use diesel::pg::Pg as Backend;
 use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::sql_types as st;
-#[cfg(feature = "sqlite")]
-use diesel::sqlite::Sqlite as Backend;
 use diesel::{Column, QueryResult};
 
 mod sql_type;

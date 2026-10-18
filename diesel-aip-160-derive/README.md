@@ -36,7 +36,7 @@ field name. All Diesel built-in column families, aliases, and nullable variants
 support filtering. Exclude fields with `#[aip160(skip)]`. PostgreSQL JSONB
 traversal uses `diesel_aip_160::JsonbPath`; `serde_json::Value` supports arbitrary
 keys automatically. SQLite JSONB supports root comparisons. See the
-[workspace README](../README.md#native-types-and-literal-formats) for formats.
+[runtime guide](../diesel-aip-160/README.md#native-types-and-literal-formats) for formats.
 
 ## `Aip160Jsonb`
 
@@ -56,7 +56,7 @@ struct Details {
 The macro implements `diesel_aip_160::JsonbPath`. Fields without a rename use
 the Rust field name; unknown fields return `None`. Struct-level
 `#[serde(rename_all = "...")]` is rejected. See the
-[workspace README](../README.md) for complete schema and query examples.
+[runtime guide](../diesel-aip-160/README.md) for complete schema and query examples.
 
 ## `Aip160PgEnum`
 
@@ -171,5 +171,14 @@ errors. Built-in MySQL/SQLite configurations and PostgreSQL search under another
 backend are rejected. Other field types need a custom search adapter.
 Quoted built-in searches are PostgreSQL lexeme phrases; unquoted values are
 ordinary terms. Presence, NULL checks, equality, and containment are unchanged.
-See the [search guide](../README.md#opt-in-full-text-search) for complete examples,
+See the [search guide](../diesel-aip-160/README.md#opt-in-full-text-search) for complete examples,
 database requirements, NULL semantics, and custom adapter responsibilities.
+
+### Opt-in ranking
+
+The same compiler also implements `QueryFilterCompiler` and generates
+`Model::compile_query_filter`, reusing all field and search registrations.
+Full-text search annotations emit `relevance`; `search_adapter` and
+`global_search_adapter` dispatch to `SearchAdapter::search_query`, and custom
+comparisons dispatch to `FieldAdapter::compare_query`. Existing adapters default
+to predicates without signals. See [ranking semantics and examples](../diesel-aip-160/README.md#ranking-signals-and-ordering).
