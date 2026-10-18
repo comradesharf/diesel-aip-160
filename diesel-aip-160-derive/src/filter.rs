@@ -61,6 +61,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut texts = Vec::new();
     let mut ilikes = Vec::new();
     let mut searches = Vec::new();
+    let mut prefixes = Vec::new();
     let mut query_searches = Vec::new();
     let mut query_customs = Vec::new();
     let mut postgres_search = false;
@@ -79,6 +80,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         let (ty, nullable) = unwrap_option(&field.ty);
         let column = quote!(#table::#ident);
         if let Some(search_adapter) = search_adapter {
+            prefixes.push(quote!(Some(#name) => <#search_adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::SUPPORTS_PREFIX,));
             query_searches.push(quote!(#name => <#search_adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search_query(value),));
             searches.push(quote!(#name => <#search_adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search(value),));
             // Explicit search adapters opt custom fields into global expansion too.
@@ -96,6 +98,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 ));
             }
             postgres_search = true;
+            prefixes.push(quote!(Some(#name) => true,));
             let (target, function) = if let Some(vector) = vector {
                 (quote!(#vector), format_ident!("vector"))
             } else {
@@ -122,13 +125,24 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         );
         ilikes.push(quote!(#name => <#ty>::__aip160_like(#column, pattern, true),));
     }
+    let global_prefix = if let Some(adapter) = &global_search {
+        quote!(<#adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::SUPPORTS_PREFIX)
+    } else {
+        quote!(
+            !self.text_fields().is_empty()
+                && self
+                    .text_fields()
+                    .iter()
+                    .all(|f| self.supports_prefix(Some(f)))
+        )
+    };
     let query_global_search = if let Some(adapter) = &global_search {
         quote!(<#adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search_query(value))
     } else {
         quote!(::diesel_aip_160::compiler::query_global_fields(self, value))
     };
     let global_search = global_search.map(|adapter| quote! {
-        fn global_search(&self, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+        fn global_search(&self, value: &::diesel_aip_160::search::SearchTerm) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
             <#adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search(value)
         }
     });
@@ -137,6 +151,10 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     Ok(quote! {
         #backend_check
         impl #model {
+            pub fn compile_search(expression: &::diesel_aip_160::parser::Expression) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
+                ::diesel_aip_160::compiler::compile_query_ast(expression, &#compiler)
+            }
+
             pub fn compile_query_filter(source: &str) -> ::diesel_aip_160::anyhow::Result<Option<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>>> {
                 ::diesel_aip_160::compiler::compile_query(source, &#compiler)
             }
@@ -148,13 +166,13 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         pub struct #compiler;
         impl ::diesel_aip_160::compiler::QueryFilterCompiler for #compiler {
             type Signal = ::diesel_aip_160::ranking::RankingSignal<#table::table>;
-            fn query_field_search(&self, field: &str, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
+            fn query_field_search(&self, field: &str, value: &::diesel_aip_160::search::SearchTerm) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
                 match field {
                     #(#query_searches)*
                     _ => ::diesel_aip_160::compiler::Aip160FilterCompiler::field_search(self, field, value).map(::diesel_aip_160::compiler::QueryFilter::predicate),
                 }
             }
-            fn query_global_search(&self, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
+            fn query_global_search(&self, value: &::diesel_aip_160::search::SearchTerm) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
                 #query_global_search
             }
             fn query_custom_compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
@@ -168,10 +186,16 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         impl ::diesel_aip_160::compiler::Aip160FilterCompiler for #compiler {
             type Predicate = ::diesel_aip_160::diesel_helpers::Predicate<#table::table>;
             #global_search
-            fn field_search(&self, field: &str, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
+            fn supports_prefix(&self, field: Option<&str>) -> bool {
+                match field { #(#prefixes)* None => #global_prefix, _ => false }
+            }
+            fn field_search(&self, field: &str, value: &::diesel_aip_160::search::SearchTerm) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
                 match field {
                     #(#searches)*
-                    _ => self.ilike(field, ::diesel_aip_160::compiler::search_pattern(&value.text)),
+                    _ => {
+                        ::diesel_aip_160::anyhow::ensure!(value.kind != ::diesel_aip_160::search::SearchKind::Prefix, "prefix search is not supported for `{field}`");
+                        self.ilike(field, ::diesel_aip_160::compiler::search_pattern(&value.text))
+                    },
                 }
             }
             fn custom_compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator,

@@ -17,15 +17,23 @@ diesel::table! { documents (id) { id -> Integer, title -> Nullable<Text>, body -
 
 struct TitleSearch;
 impl SearchAdapter<documents::table> for TitleSearch {
-    fn search(value: &Value) -> diesel_aip_160::anyhow::Result<Predicate<documents::table>> {
+    fn search(
+        value: &::diesel_aip_160::search::SearchTerm,
+    ) -> diesel_aip_160::anyhow::Result<Predicate<documents::table>> {
         // The transformed bind proves adapters receive quoting and raw text.
-        let query = format!("{}:{}", value.quoted, value.text);
+        let query = format!(
+            "{}:{}",
+            value.kind == diesel_aip_160::search::SearchKind::Phrase,
+            value.text
+        );
         Ok(Box::new(documents::body.eq(query).assume_not_null()))
     }
 }
 struct GlobalSearch;
 impl SearchAdapter<documents::table> for GlobalSearch {
-    fn search(value: &Value) -> diesel_aip_160::anyhow::Result<Predicate<documents::table>> {
+    fn search(
+        value: &::diesel_aip_160::search::SearchTerm,
+    ) -> diesel_aip_160::anyhow::Result<Predicate<documents::table>> {
         Ok(Box::new(
             documents::body.eq(value.text.clone()).assume_not_null(),
         ))
@@ -196,4 +204,23 @@ fn existing_adapters_need_no_rank_implementation() {
             .signals
             .is_empty()
     );
+}
+
+#[test]
+fn prefix_support_requires_explicit_adapter_or_backend_capability() {
+    for source in ["title:sen*", "sen*"] {
+        assert!(
+            Document::compile_filter(source)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("prefix search is not supported")
+        );
+        assert!(Document::compile_query_filter(source).is_err());
+    }
+    assert!(GlobalDocument::compile_filter("sen*").is_err());
+    let expression = diesel_aip_160::search::autocomplete_field("title", "sen")
+        .unwrap()
+        .unwrap();
+    assert!(Document::compile_search(&expression).is_err());
 }

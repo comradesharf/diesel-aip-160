@@ -1,6 +1,7 @@
 //! AIP-160 AST validation and compilation into backend predicates.
 
 use super::parser::{self, Argument, Comparable, Comparator, Expression, Value};
+use crate::search::{SearchKind, SearchTerm};
 use anyhow::{Result, bail, ensure};
 
 /// Scalar comparison delivered to custom field adapters; `:` maps to `Equal`.
@@ -24,7 +25,8 @@ pub enum FieldType {
 }
 
 /// Operations required to compile an AIP-160 expression. Native handlers and
-/// custom adapters receive the original literal spelling and quoting.
+/// comparison adapters receive the original literal spelling and quoting;
+/// search adapters receive explicit search terms.
 pub trait Aip160FilterCompiler {
     type Predicate;
 
@@ -52,17 +54,31 @@ pub trait Aip160FilterCompiler {
     /// fields here as well as ordinary text fields. Nontext containment fields
     /// must be omitted unless they deliberately opt into a search adapter.
     fn text_fields(&self) -> &'static [&'static str];
-    /// Search a registered field using the original literal, including quoting.
+    /// Explicit prefix capability. Global expansion requires every searched field
+    /// to support prefixes; global overrides must declare their own capability.
+    fn supports_prefix(&self, field: Option<&str>) -> bool {
+        field.is_none()
+            && !self.text_fields().is_empty()
+            && self
+                .text_fields()
+                .iter()
+                .all(|f| self.supports_prefix(Some(f)))
+    }
+    /// Search a registered field using explicit exact, phrase, or prefix semantics.
     /// The default is an escaped, case-insensitive substring match. Compilation
     /// routes `:` here only for registered searchable fields; unquoted `*` and
     /// `null` retain their existing presence/comparison dispatch.
-    fn field_search(&self, field: &str, value: &Value) -> Result<Self::Predicate> {
+    fn field_search(&self, field: &str, value: &SearchTerm) -> Result<Self::Predicate> {
+        ensure!(
+            value.kind != SearchKind::Prefix,
+            "prefix search is not supported for `{field}`"
+        );
         self.ilike(field, substring_pattern(&value.text))
     }
 
     /// Search a global term. By default, OR together each registered text field's
     /// `field_search`, so field-specific search configuration also applies here.
-    fn global_search(&self, value: &Value) -> Result<Self::Predicate> {
+    fn global_search(&self, value: &SearchTerm) -> Result<Self::Predicate> {
         let mut fields = self.text_fields().iter();
         let first = fields
             .next()
@@ -84,7 +100,7 @@ pub fn compile<C: Aip160FilterCompiler>(
     compiler: &C,
 ) -> Result<Option<C::Predicate>> {
     parser::parse_filter(source)?
-        .map(|expression| compile_expression(&expression, compiler, None))
+        .map(|expression| compile_ast(&expression, compiler))
         .transpose()
 }
 
@@ -125,7 +141,7 @@ pub trait QueryFilterCompiler: Aip160FilterCompiler {
     fn query_field_search(
         &self,
         field: &str,
-        value: &Value,
+        value: &SearchTerm,
     ) -> Result<QueryFilter<Self::Predicate, Self::Signal>> {
         self.field_search(field, value).map(QueryFilter::predicate)
     }
@@ -133,7 +149,7 @@ pub trait QueryFilterCompiler: Aip160FilterCompiler {
     /// Use `query_global_fields` to collect ranked searches from registered fields.
     fn query_global_search(
         &self,
-        value: &Value,
+        value: &SearchTerm,
     ) -> Result<QueryFilter<Self::Predicate, Self::Signal>> {
         self.global_search(value).map(QueryFilter::predicate)
     }
@@ -157,7 +173,7 @@ pub trait QueryFilterCompiler: Aip160FilterCompiler {
 /// Expand a global search using the same registered fields as predicate compilation.
 pub fn query_global_fields<C: QueryFilterCompiler>(
     compiler: &C,
-    value: &Value,
+    value: &SearchTerm,
 ) -> Result<QueryFilter<C::Predicate, C::Signal>> {
     let mut fields = compiler.text_fields().iter();
     let first = fields
@@ -175,19 +191,28 @@ pub fn compile_query<C: QueryFilterCompiler>(
     source: &str,
     compiler: &C,
 ) -> Result<Option<QueryFilter<C::Predicate, C::Signal>>> {
-    compile(source, &WithSignals(compiler))?
-        .map(|result| {
-            let signals = result
-                .signals
-                .into_iter()
-                .filter_map(|(positive, signal)| positive.then_some(signal))
-                .collect();
-            Ok(QueryFilter {
-                predicate: result.predicate,
-                signals: compiler.finish_signals(signals)?,
-            })
-        })
+    let expression = parser::parse_filter(source)?;
+    expression
+        .as_ref()
+        .map(|expression| compile_query_ast(expression, compiler))
         .transpose()
+}
+
+/// Compile a typed expression, retaining positive ranking signals.
+pub fn compile_query_ast<C: QueryFilterCompiler>(
+    expression: &Expression,
+    compiler: &C,
+) -> Result<QueryFilter<C::Predicate, C::Signal>> {
+    let result = compile_ast(expression, &WithSignals(compiler))?;
+    let signals = result
+        .signals
+        .into_iter()
+        .filter_map(|(positive, signal)| positive.then_some(signal))
+        .collect();
+    Ok(QueryFilter {
+        predicate: result.predicate,
+        signals: compiler.finish_signals(signals)?,
+    })
 }
 
 struct WithSignals<'a, C>(&'a C);
@@ -199,10 +224,10 @@ impl<C: QueryFilterCompiler> Aip160FilterCompiler for WithSignals<'_, C> {
     fn custom_compare(&self, f: &str, o: ComparisonOperator, v: &Value) -> Result<Self::Predicate> {
         self.0.query_custom_compare(f, o, v).map(mark_positive)
     }
-    fn field_search(&self, f: &str, v: &Value) -> Result<Self::Predicate> {
+    fn field_search(&self, f: &str, v: &SearchTerm) -> Result<Self::Predicate> {
         self.0.query_field_search(f, v).map(mark_positive)
     }
-    fn global_search(&self, v: &Value) -> Result<Self::Predicate> {
+    fn global_search(&self, v: &SearchTerm) -> Result<Self::Predicate> {
         self.0.query_global_search(v).map(mark_positive)
     }
     fn constant(&self, v: bool) -> Self::Predicate {
@@ -210,6 +235,9 @@ impl<C: QueryFilterCompiler> Aip160FilterCompiler for WithSignals<'_, C> {
     }
     fn field_type(&self, f: &str) -> Result<FieldType> {
         self.0.field_type(f)
+    }
+    fn supports_prefix(&self, field: Option<&str>) -> bool {
+        self.0.supports_prefix(field)
     }
     fn text_fields(&self) -> &'static [&'static str] {
         self.0.text_fields()
@@ -238,15 +266,59 @@ fn mark_positive<P, S>(q: QueryFilter<P, S>) -> QueryFilter<P, (bool, S)> {
     }
 }
 
+/// Compile an expression built by the parser or typed search helpers.
+/// Callers constructing arbitrary trees must keep them within parser limits.
+pub fn compile_ast<C: Aip160FilterCompiler>(
+    expression: &Expression,
+    compiler: &C,
+) -> Result<C::Predicate> {
+    compile_expression(expression, compiler, None)
+}
+
+fn search<C: Aip160FilterCompiler>(
+    compiler: &C,
+    field: Option<&str>,
+    term: &SearchTerm,
+) -> Result<C::Predicate> {
+    if let Some(field) = field {
+        compiler.field_type(field)?;
+        ensure!(
+            compiler.text_fields().contains(&field),
+            "field `{field}` is not searchable"
+        );
+    }
+    if term.kind == SearchKind::Prefix {
+        SearchTerm::prefix(&term.text)?;
+        ensure!(
+            compiler.supports_prefix(field),
+            "prefix search is not supported for {}",
+            field.unwrap_or("global search (all configured fields must support prefixes)")
+        );
+    }
+    match field {
+        Some(field) => compiler.field_search(field, term),
+        None => compiler.global_search(term),
+    }
+}
+
 fn compile_expression<C: Aip160FilterCompiler>(
     expression: &Expression,
     compiler: &C,
     restriction: Option<(&str, Comparator)>,
 ) -> Result<C::Predicate> {
     match expression {
+        Expression::Search { field, term } => {
+            ensure!(
+                restriction.is_none(),
+                "typed searches cannot inherit a restriction"
+            );
+            search(compiler, field.as_deref(), term)
+        }
         Expression::And(expressions) | Expression::Or(expressions) => {
             let mut expressions = expressions.iter();
-            let first = expressions.next().expect("parser produces nonempty groups");
+            let first = expressions
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("empty Boolean group"))?;
             expressions.try_fold(
                 compile_expression(first, compiler, restriction)?,
                 |left, right| {
@@ -289,7 +361,7 @@ fn compile_expression<C: Aip160FilterCompiler>(
                 compare(compiler, field, operator, &value)
             } else {
                 // Bare true, false and null remain search terms.
-                compiler.global_search(&value)
+                search(compiler, None, &SearchTerm::from_literal(&value)?)
             }
         }
     }
@@ -352,7 +424,7 @@ fn compare<C: Aip160FilterCompiler>(
         && (value.quoted || (value.text != "*" && value.text != "null"))
         && compiler.text_fields().contains(&field)
     {
-        return compiler.field_search(field, value);
+        return search(compiler, Some(field), &SearchTerm::from_literal(value)?);
     }
     match compiler.field_type(field)? {
         FieldType::Native => compiler.native_compare(field, operator, value),
@@ -416,7 +488,7 @@ mod tests {
         Native(String, Comparator, Value),
         Custom(String, ComparisonOperator, Value),
         Search(String, String),
-        SearchValue(String, Value),
+        SearchValue(String, SearchTerm),
         Constant(bool),
         And(Box<Self>, Box<Self>),
         Or(Box<Self>, Box<Self>),
@@ -587,7 +659,7 @@ mod tests {
 
     #[test]
     fn global_search_escapes_patterns_and_uses_only_declared_text_fields() {
-        for literal in ["true", "null", "001", "a.b", "*"] {
+        for literal in ["true", "null", "001", "a.b"] {
             assert_eq!(
                 compiled(literal),
                 Predicate::Search("name".into(), format!("%{literal}%"))
@@ -625,11 +697,11 @@ mod tests {
         fn ilike(&self, field: &str, pattern: String) -> Result<Predicate> {
             TestCompiler(&[]).ilike(field, pattern)
         }
-        fn field_search(&self, field: &str, value: &Value) -> Result<Predicate> {
+        fn field_search(&self, field: &str, value: &SearchTerm) -> Result<Predicate> {
             // Record the raw value instead of converting it to a LIKE pattern.
             Ok(Predicate::SearchValue(field.into(), value.clone()))
         }
-        fn global_search(&self, value: &Value) -> Result<Predicate> {
+        fn global_search(&self, value: &SearchTerm) -> Result<Predicate> {
             if self.global_override {
                 return self.field_search("document", value);
             }
@@ -650,7 +722,7 @@ mod tests {
         }
     }
 
-    fn compile_default_global(compiler: &SearchCompiler, value: &Value) -> Result<Predicate> {
+    fn compile_default_global(compiler: &SearchCompiler, value: &SearchTerm) -> Result<Predicate> {
         struct DefaultGlobal<'a>(&'a SearchCompiler);
         impl Aip160FilterCompiler for DefaultGlobal<'_> {
             type Predicate = Predicate;
@@ -666,7 +738,7 @@ mod tests {
             fn ilike(&self, f: &str, p: String) -> Result<Predicate> {
                 self.0.ilike(f, p)
             }
-            fn field_search(&self, f: &str, v: &Value) -> Result<Predicate> {
+            fn field_search(&self, f: &str, v: &SearchTerm) -> Result<Predicate> {
                 self.0.field_search(f, v)
             }
             fn constant(&self, v: bool) -> Predicate {
@@ -686,7 +758,10 @@ mod tests {
     }
 
     fn searched(field: &str, text: &str, quoted: bool) -> Predicate {
-        Predicate::SearchValue(field.into(), value(text, quoted))
+        Predicate::SearchValue(
+            field.into(),
+            SearchTerm::from_literal(&value(text, quoted)).unwrap(),
+        )
     }
 
     #[test]
@@ -778,7 +853,7 @@ mod tests {
             fn query_field_search(
                 &self,
                 f: &str,
-                v: &Value,
+                v: &SearchTerm,
             ) -> Result<QueryFilter<Predicate, String>> {
                 self.0.set(self.0.get() + 1);
                 Ok(QueryFilter {
@@ -786,7 +861,10 @@ mod tests {
                     signals: vec![v.text.clone()],
                 })
             }
-            fn query_global_search(&self, v: &Value) -> Result<QueryFilter<Predicate, String>> {
+            fn query_global_search(
+                &self,
+                v: &SearchTerm,
+            ) -> Result<QueryFilter<Predicate, String>> {
                 query_global_fields(self, v)
             }
         }

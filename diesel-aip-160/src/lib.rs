@@ -11,7 +11,6 @@ pub mod parser;
 pub mod pg_enum;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub mod ranking;
-#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub mod search;
 
 pub use compiler::QueryFilter;

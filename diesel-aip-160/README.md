@@ -656,14 +656,15 @@ match the document's construction configuration; the compiler cannot verify
 database setup. Static configuration names accept ASCII letters, digits,
 underscores, and dots (for schema qualification).
 
-PostgreSQL uses `plainto_tsquery` for unquoted literals and `phraseto_tsquery` for
-quoted literals. A quoted multiword value means an ordered lexeme phrase,
+PostgreSQL uses `plainto_tsquery` for exact terms and `phraseto_tsquery` for
+phrases. A quoted multiword value means an ordered lexeme phrase,
 including stop-word distances, rather than an exact byte substring. Stemming,
 stop words, and tokenization follow the explicit configuration. Empty or
 stop-word-only queries match no rows. User punctuation is processed as plain
-text, without interpreting tsquery operators, prefixes, or wildcards.
+text, without interpreting tsquery operators. The explicit trailing-wildcard
+extension below selects prefix semantics before normalization.
 
-The filter grammar is unchanged: `title:"diesel engine"` is one phrase search;
+Boolean filter grammar is unchanged: `title:"diesel engine"` is one phrase search;
 `title:diesel engine` is a title term AND a separate global term. Both quote
 styles supported by the parser set the phrase flag. AND, OR, NOT, grouping,
 composite field arguments, implicit AND, and AIP-160's OR-before-AND precedence
@@ -674,16 +675,124 @@ Only search changes. Equality, inequality, ordering, wildcard equality, NULL
 checks, `field:*`, and nontext containment retain their behavior. Unquoted
 `field:null` stays on the comparison path (and remains invalid for nullable
 text); quoted `field:"null"` searches text. Required text retains its previous
-literal `field:null` behavior. Global `null` and `*` remain search terms.
+literal `field:null` behavior. Global `null` remains a search term; bare global
+`*` is rejected as an empty prefix.
 NULL search targets produce SQL NULL, also under NOT, so neither a search nor
 its negation selects a NULL target. A global OR may still match another field.
 Applications may deliberately build combined documents with `coalesce`, as
 above, giving that document empty text for missing source columns.
 
+### Prefix search and autocomplete (dialect extension)
+
+A single **unquoted trailing `*` in search context** is an explicit extension of
+this crate's AIP-160 dialect; it is not standard AIP-160 syntax:
+
+| Filter | PostgreSQL search meaning |
+| --- | --- |
+| `long_name:sen*` | Every normalized query lexeme is a token prefix; matches Sentral. |
+| `sen*` | OR the same prefix search across configured searchable fields. |
+| `long_name:sentral` | Whole normalized token, with configuration-specific stemming. |
+| `long_name:"Kuala Lumpur"` | Ordered lexeme phrase. |
+| `long_name:*` | Existing presence check. |
+| `long_name="sen*"` | Existing wildcard equality, independent of full-text search. |
+
+Prefixes match lexeme beginnings, not arbitrary substrings: `sen*` does not match
+`Presen`. Single-character prefixes such as `s*` and route codes such as `T7*`
+are supported. A single letter can match many index entries, so an index-eligible
+query may still be expensive or naturally favor a sequential scan.
+
+Leading/interior/multiple wildcards (`*sen`, `s*n`, `sen**`), empty prefixes
+(global `*`), and punctuation-only prefixes (`!!!*`) produce errors. Quoted
+asterisks, including `"sen\*"`, remain literal phrase text; PostgreSQL's tokenizer
+may discard the punctuation, but it never enables a prefix. Unquoted backslash
+escapes are unsupported and rejected by the parser. Empty/punctuation-only exact
+or phrase queries match no rows. Stop-word-only prefixes also match no rows.
+
+Prefix capability is explicit. Built-in PostgreSQL text and stored-vector search
+support it; ordinary substring fields and adapters without `SUPPORTS_PREFIX`
+reject it. Default global prefix search requires **every participating field** to
+support prefixes, otherwise compilation fails. Configure all searched text fields,
+restrict autocomplete to a field, or supply a prefix-capable global adapter.
+MySQL/SQLite have no built-in prefix adapter and never silently fall back to LIKE.
+
+For arbitrary user text, use the typed API rather than constructing filter syntax:
+
+```rust
+# #[cfg(feature = "postgres")]
+# fn demo() -> diesel_aip_160::anyhow::Result<()> {
+use diesel_aip_160::{Aip160Filter, search::{autocomplete_field, SearchTerm}};
+diesel::table! { routes (id) { id -> Integer, long_name -> Nullable<Text> } }
+#[derive(Aip160Filter)]
+#[diesel(table_name = routes)]
+struct Route {
+    #[aip160(search(postgres, configuration = "simple"))]
+    long_name: Option<String>,
+}
+// "s" -> prefix("s"); "kuala sen" -> exact("kuala") AND prefix("sen").
+if let Some(expression) = autocomplete_field("long_name", "kuala sen")? {
+    let mut query = Route::compile_search(&expression)?;
+    let order = query.ordering(&["relevance"])?;
+    // Apply predicate, order, an id tie-breaker, then pagination with Diesel.
+    let _ = (query.predicate, order);
+}
+let expression = SearchTerm::prefix("sen")?.field("long_name");
+let _ = Route::compile_search(&expression)?;
+# Ok(())
+# }
+```
+
+`search::autocomplete(text)` builds global searches. Unicode whitespace separates
+chunks; punctuation-only chunks are discarded. All retained chunks except the
+last are exact, the last is prefix, joined with AND. Trailing whitespace does not
+finalize a chunk. Empty/punctuation-only input returns `None` (applications choose
+whether to show no suggestions or omit a filter). Quotes, backslashes, `*`, `OR`,
+`NOT`, and filter/tsquery operators in these APIs are ordinary text. Case, Unicode,
+and punctuation within a chunk are preserved, with no client-side folding,
+stemming, or transliteration. PostgreSQL's configured tokenizer/dictionaries
+normalize them; a chunk yielding multiple lexemes requires all of them (all
+prefixes for the final chunk). Size and term-count limits match the parser.
+`SearchTerm::exact`, `phrase`, `prefix`, `.field()`, and `.global()` also allow
+explicit construction and Boolean composition using `parser::Expression`.
+
+Prefix SQL leaves the indexed document expression exactly
+`to_tsvector('simple'::regconfig, column)`. The bound query text is normalized by
+`to_tsvector(configuration, $1)` in a row-independent scalar subquery. Its lexemes
+are escaped for tsquery (doubling quotes and backslashes), suffixed with `:*`,
+joined with AND, and cast directly to `tsquery`. The direct cast avoids applying
+dictionaries twice to already normalized lexemes. No raw user text is SQL or
+tsquery syntax. Matching and `ts_rank_cd` use this identical query construction;
+exact, phrase, and prefix identities remain distinct during deduplication.
+NULL targets remain SQL NULL under NOT; relevance NULL scores remain zero.
+
+Keep the **index expression and configuration aligned**, including any schema
+qualification, column choice, and stored-vector construction. This implementation
+adds no coalesce, concatenation, or other wrapper to indexed text targets.
+`EXPLAIN` tests use representative fixtures and assert GIN eligibility with
+sequential scans discouraged; they do not require the planner to choose GIN on
+tiny tables or broad terms and do not snapshot entire plans.
+
+### Migrating search adapters and compilers
+
+Search-only hooks now accept `&search::SearchTerm` instead of `&parser::Value`:
+`SearchAdapter::{search, search_query}`, compiler field/global search hooks, and
+`search::postgres::{text, vector, text_query, vector_query}`. Read `term.kind`
+(`SearchKind::Exact`, `Phrase`, `Prefix`) instead of `value.quoted`. Comparison
+adapters still receive `Value`; equality, wildcard equality, and presence dispatch
+are unchanged. `Expression` gains `Search { field, term }`; exhaustive matches
+must handle it. `search` is available even without a database feature.
+
+Adapters implement `const SUPPORTS_PREFIX: bool = true` only when both matching
+and ranked search honor prefixes. It defaults to false. Custom compilers implement
+`supports_prefix(Some(field))` and, for custom global search, `supports_prefix(None)`.
+Pass the term unchanged to built-in PostgreSQL helpers, or implement equivalent
+bound, backend-aware semantics. Do not turn prefix input into substring matching.
+Generic callers can use `compiler::compile_ast` / `compile_query_ast`; derived
+models expose `compile_search(&Expression)` for ranked typed queries.
+
 ### Custom search adapters
 
 `diesel_helpers::SearchAdapter<Table>` is independent of `FieldAdapter<Column>`.
-It receives `&parser::Value` with original text and quoting and returns
+It receives `&search::SearchTerm` with literal text and explicit semantics and returns
 `anyhow::Result<Predicate<Table>>`, a typed, boxed Diesel boolean expression.
 Use `#[aip160(search_adapter = MySearch)]` on a field, or
 `#[aip160(global_search_adapter = CombinedDocument)]` on a model:
@@ -694,7 +803,7 @@ Use `#[aip160(search_adapter = MySearch)]` on a field, or
 
 # pub fn run() -> diesel_aip_160::anyhow::Result<()> {
 use diesel_aip_160::{Aip160Filter, Predicate, SearchAdapter, CompiledQueryFilter};
-use diesel_aip_160::{parser::Value, search::postgres};
+use diesel_aip_160::search::{SearchTerm, postgres};
 diesel::table! {
     use diesel::sql_types::*;
     use diesel_aip_160::search::postgres::TsVector;
@@ -702,10 +811,11 @@ diesel::table! {
 }
 struct CombinedDocument;
 impl SearchAdapter<articles::table> for CombinedDocument {
-    fn search(value: &Value) -> diesel_aip_160::anyhow::Result<Predicate<articles::table>> {
+    const SUPPORTS_PREFIX: bool = true;
+    fn search(value: &SearchTerm) -> diesel_aip_160::anyhow::Result<Predicate<articles::table>> {
         postgres::vector(articles::document, "english", value)
     }
-    fn search_query(value: &Value) -> diesel_aip_160::anyhow::Result<CompiledQueryFilter<articles::table>> {
+    fn search_query(value: &SearchTerm) -> diesel_aip_160::anyhow::Result<CompiledQueryFilter<articles::table>> {
         postgres::vector_query(articles::document, "english", value)
     }
 }
@@ -769,8 +879,7 @@ A search annotation such as
 `#[aip160(search(postgres, configuration = "english"))]` emits a signal named
 `relevance` with SQL type `Float`, preferred direction `Descending`, and operation
 `postgres.full_text`. It uses `ts_rank_cd` with exactly the matching target,
-configuration, and query constructor (`phraseto_tsquery` for quoted literals,
-`plainto_tsquery` for unquoted literals). `vector = articles::document` also
+configuration, and explicit query kind (plain exact, phrase, or normalized prefix). `vector = articles::document` also
 ranks that stored vector. All user values are bound. Scores use
 `COALESCE(..., 0.0::real)` so missing text scores zero rather than sorting first;
 predicates still preserve SQL NULL, including under NOT. Default substring
@@ -948,7 +1057,7 @@ adapter expression. No user-defined SQL renderer is required.
   and SQL three-valued logic are unchanged.
 - The built-in text policy alone takes the maximum positive full-text score as one
   `relevance` signal. It deduplicates identical target/configuration/literal/
-  quoting contributions, including global/field overlap and fields sharing a
+  search-kind contributions, including global/field overlap and fields sharing a
   stored vector. Distinct contributions use `GREATEST`, so equivalent quoted,
   case-folded, or stemmed queries cannot inflate the score even when their
   literal spellings differ. This strongest-match policy also avoids rewarding
@@ -979,17 +1088,17 @@ expressions, with no spatial extension:
 # pub fn run() -> diesel_aip_160::anyhow::Result<()> {
 use diesel::prelude::*;
 use diesel_aip_160::{Aip160Filter, CompiledQueryFilter, Direction, Predicate,
-    QueryFilter, RankingSignal, SearchAdapter, parser::Value};
+    QueryFilter, RankingSignal, SearchAdapter, search::SearchTerm};
 diesel::table! { places (id) { id -> Integer, label -> Text } }
 diesel::define_sql_function! {
     fn abs(value: diesel::sql_types::Integer) -> diesel::sql_types::Integer;
 }
 struct Distance;
 impl SearchAdapter<places::table> for Distance {
-    fn search(_: &Value) -> diesel_aip_160::anyhow::Result<Predicate<places::table>> {
+    fn search(_: &SearchTerm) -> diesel_aip_160::anyhow::Result<Predicate<places::table>> {
         Ok(Box::new(places::id.ge(0)))
     }
-    fn search_query(value: &Value) -> diesel_aip_160::anyhow::Result<CompiledQueryFilter<places::table>> {
+    fn search_query(value: &SearchTerm) -> diesel_aip_160::anyhow::Result<CompiledQueryFilter<places::table>> {
         let center: i32 = value.text.parse()?;
         Ok(QueryFilter {
             predicate: Self::search(value)?,
@@ -1087,9 +1196,9 @@ type. Supply field types, searchable text fields, constants, and logical
 composition. Return `FieldType::Native` for built-in fields and implement
 `native_compare` to interpret the original `parser::Comparator` and
 `parser::Value`, including quoting, wildcard equality, containment, and NULL
-semantics. Implement `ilike` for default substring searches. The default `field_search` and
-`global_search` methods preserve compatibility; override them to receive the
-original `parser::Value`, including its quoting flag. Application-defined
+semantics. Implement `ilike` for default substring searches. Override `field_search`
+and `global_search` to receive `search::SearchTerm`, including explicit search
+kind. Declare prefix capability with `supports_prefix`. Application-defined
 fields use `FieldType::Custom { nullable }` and `custom_compare`. See the
 [changelog](https://github.com/comradesharf/diesel-aip-160/blob/main/CHANGELOG.md) for beta migration notes.
 

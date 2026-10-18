@@ -43,19 +43,24 @@ pub trait FieldAdapter<C: Column> {
 /// Selected with field `#[aip160(search_adapter = MySearch)]` or model
 /// `#[aip160(global_search_adapter = MySearch)]`. Field search adapters receive `:`
 /// literals (except unquoted `*`/`null`); global adapters receive every bare term.
-/// The original text and quoting are preserved. Choose and document query
+/// Terms explicitly distinguish exact, phrase, and prefix searches. Choose and document query
 /// semantics, bind user input, and use only trusted SQL structure/identifiers.
 /// Preserve SQL NULL semantics, including under NOT (avoid COALESCE unless the
 /// application's search document deliberately defines missing text as empty).
 /// The returned predicate may target any registered column or expression on Table.
 pub trait SearchAdapter<Table> {
+    /// Opt in only when both search methods implement prefix semantics.
+    /// The compiler rejects prefix terms before invoking unsupported adapters.
+    const SUPPORTS_PREFIX: bool = false;
+
     /// Opt-in ranked search; adapters define the meaning and NULL policy of metrics.
     fn search_query(
-        value: &crate::parser::Value,
+        value: &crate::search::SearchTerm,
     ) -> Result<crate::ranking::CompiledQueryFilter<Table>> {
         Self::search(value).map(crate::compiler::QueryFilter::predicate)
     }
 
-    /// Build the matching predicate for the original term or quoted phrase.
-    fn search(value: &crate::parser::Value) -> Result<Predicate<Table>>;
+    /// Build the predicate for literal text and its explicit search kind.
+    /// Prefix terms are delivered only when `SUPPORTS_PREFIX` is true.
+    fn search(value: &crate::search::SearchTerm) -> Result<Predicate<Table>>;
 }

@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use diesel_aip_160::{
     Aip160Filter,
     diesel_helpers::{Predicate, SearchAdapter},
-    parser::Value,
+    search::SearchTerm,
     search::postgres,
 };
 
@@ -43,7 +43,10 @@ struct DocumentArticle {
 }
 struct DocumentSearch;
 impl SearchAdapter<articles::table> for DocumentSearch {
-    fn search(value: &Value) -> diesel_aip_160::anyhow::Result<Predicate<articles::table>> {
+    const SUPPORTS_PREFIX: bool = true;
+    fn search(
+        value: &::diesel_aip_160::search::SearchTerm,
+    ) -> diesel_aip_160::anyhow::Result<Predicate<articles::table>> {
         postgres::vector(articles::document, "english", value)
     }
 }
@@ -125,17 +128,7 @@ fn search_opt_in_keeps_comparisons_presence_nulls_and_json_containment() {
     let query = sql("NOT title:diesel", false);
     assert!(query.contains("NOT"));
     assert!(!query.to_lowercase().contains("coalesce"));
-    assert!(
-        postgres::text(
-            articles::title,
-            "english';--",
-            &Value {
-                text: "x".into(),
-                quoted: false
-            }
-        )
-        .is_err()
-    );
+    assert!(postgres::text(articles::title, "english';--", &SearchTerm::exact("x")).is_err());
 }
 
 #[cfg(feature = "postgres-integration")]
@@ -170,7 +163,11 @@ fn full_text_executes_with_stemming_phrases_nulls_and_combined_documents() {
     };
     for (source, expected) in [
         ("title:diesel", vec![1, 2]), // No substring match inside biodiesel.
-        ("title:run", vec![5]),       // English stemming, unlike substring search.
+        ("title:run", vec![5]),
+        ("title:r*", vec![5]),
+        ("title:running*", vec![5]),
+        ("title:the*", vec![]),
+        ("title:'the&!!!'", vec![]), // English stemming, unlike substring search.
         ("title:'diesel engine'", vec![1]),
         ("title:diesel engine", vec![1, 2]),
         ("NOT title:diesel", vec![3, 5]), // NULL remains unknown under NOT.
@@ -185,6 +182,7 @@ fn full_text_executes_with_stemming_phrases_nulls_and_combined_documents() {
     ] {
         assert_eq!(ids(source, false), expected, "{source}");
     }
+    assert_eq!(ids("man*", true), vec![1, 5]);
     assert_eq!(ids("manual", true), vec![1, 5]);
     assert_eq!(ids("title:manual", true), vec![1, 5]);
     assert_eq!(ids("NOT manual", true), vec![2, 3, 4]); // Document deliberately coalesces missing text.
@@ -342,11 +340,14 @@ struct AllTextArticle {
 }
 struct RankedDocumentSearch;
 impl SearchAdapter<articles::table> for RankedDocumentSearch {
-    fn search(value: &Value) -> diesel_aip_160::anyhow::Result<Predicate<articles::table>> {
+    const SUPPORTS_PREFIX: bool = true;
+    fn search(
+        value: &::diesel_aip_160::search::SearchTerm,
+    ) -> diesel_aip_160::anyhow::Result<Predicate<articles::table>> {
         postgres::vector(articles::document, "english", value)
     }
     fn search_query(
-        value: &Value,
+        value: &::diesel_aip_160::search::SearchTerm,
     ) -> diesel_aip_160::anyhow::Result<diesel_aip_160::ranking::CompiledQueryFilter<articles::table>>
     {
         postgres::vector_query(articles::document, "english", value)
@@ -512,15 +513,8 @@ fn finalized_text_scores_are_not_deduplicated_as_single_leaf_contributions() {
     let mut compiled = Article::compile_query_filter("title:(diesel OR engine)")
         .unwrap()
         .unwrap();
-    let leaf = postgres::text_query(
-        articles::title,
-        "english",
-        &Value {
-            text: "diesel".into(),
-            quoted: false,
-        },
-    )
-    .unwrap();
+    let leaf =
+        postgres::text_query(articles::title, "english", &SearchTerm::exact("diesel")).unwrap();
     compiled.signals.extend(leaf.signals);
     compiled.signals = diesel_aip_160::search::finish_signals(compiled.signals);
     assert_eq!(compiled.signals.len(), 2);

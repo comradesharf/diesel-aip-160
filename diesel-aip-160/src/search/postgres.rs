@@ -7,7 +7,11 @@ use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::sql_types::{Bool, Nullable, Text};
 use diesel::{Column, Expression, QueryResult};
 
-use crate::{diesel_helpers::Predicate, parser::Value, ranking::RankingSignal};
+use crate::{
+    diesel_helpers::Predicate,
+    ranking::RankingSignal,
+    search::{SearchKind, SearchTerm},
+};
 
 /// Diesel SQL type for a stored PostgreSQL search document. Applications may
 /// reference it in `table!` declarations; no Rust value codec is required
@@ -29,9 +33,9 @@ impl sealed::VectorTarget for Nullable<TsVector> {}
 /// targets are rejected at compile time, even if a model calls them String.
 ///
 /// ```compile_fail
-/// use diesel_aip_160::{search::postgres, parser::Value};
+/// use diesel_aip_160::{search::{postgres, SearchTerm}};
 /// diesel::table! { articles (id) { id -> Integer } }
-/// postgres::text(articles::id, "english", &Value { text: "x".into(), quoted: false });
+/// postgres::text(articles::id, "english", &SearchTerm::exact("x"));
 /// ```
 pub trait TextTarget: sealed::TextTarget {}
 impl<T: sealed::TextTarget> TextTarget for T {}
@@ -39,9 +43,9 @@ impl<T: sealed::TextTarget> TextTarget for T {}
 /// accidentally be registered as a stored search document.
 ///
 /// ```compile_fail
-/// use diesel_aip_160::{search::postgres, parser::Value};
+/// use diesel_aip_160::{search::{postgres, SearchTerm}};
 /// diesel::table! { articles (id) { id -> Integer, title -> Text } }
-/// postgres::vector(articles::title, "english", &Value { text: "x".into(), quoted: false });
+/// postgres::vector(articles::title, "english", &SearchTerm::exact("x"));
 /// ```
 pub trait VectorTarget: sealed::VectorTarget {}
 impl<T: sealed::VectorTarget> VectorTarget for T {}
@@ -51,7 +55,11 @@ impl<T: sealed::VectorTarget> VectorTarget for T {}
 /// not accelerate this predicate. Configuration is a trusted static name,
 /// restricted to ASCII letters/digits/underscore/dot, rendered as a SQL
 /// constant so expression indexes can match it. User text is always bound.
-pub fn text<C>(column: C, configuration: &'static str, value: &Value) -> Result<Predicate<C::Table>>
+pub fn text<C>(
+    column: C,
+    configuration: &'static str,
+    value: &SearchTerm,
+) -> Result<Predicate<C::Table>>
 where
     C: Column + QueryFragment<Pg> + Send + 'static,
     C::SqlType: TextTarget,
@@ -65,7 +73,7 @@ where
 pub fn vector<C>(
     column: C,
     configuration: &'static str,
-    value: &Value,
+    value: &SearchTerm,
 ) -> Result<Predicate<C::Table>>
 where
     C: Column + QueryFragment<Pg> + Send + 'static,
@@ -79,7 +87,7 @@ where
 pub fn text_query<C>(
     column: C,
     configuration: &'static str,
-    value: &Value,
+    value: &SearchTerm,
 ) -> Result<crate::ranking::CompiledQueryFilter<C::Table>>
 where
     C: Column + Copy + QueryFragment<Pg> + Send + 'static,
@@ -92,7 +100,7 @@ where
 pub fn vector_query<C>(
     column: C,
     configuration: &'static str,
-    value: &Value,
+    value: &SearchTerm,
 ) -> Result<crate::ranking::CompiledQueryFilter<C::Table>>
 where
     C: Column + Copy + QueryFragment<Pg> + Send + 'static,
@@ -104,7 +112,7 @@ where
 fn ranked<C>(
     column: C,
     configuration: &'static str,
-    value: &Value,
+    value: &SearchTerm,
     target: Target,
 ) -> Result<crate::ranking::CompiledQueryFilter<C::Table>>
 where
@@ -154,7 +162,7 @@ impl<C: QueryFragment<Pg>> QueryFragment<Pg> for Rank<C> {
 fn predicate<C>(
     column: C,
     configuration: &'static str,
-    value: &Value,
+    value: &SearchTerm,
     target: Target,
 ) -> Result<Predicate<C::Table>>
 where
@@ -175,7 +183,7 @@ struct SearchKey {
     column: TypeId,
     configuration: &'static str,
     query: String,
-    phrase: bool,
+    kind: SearchKind,
     target: Target,
 }
 
@@ -185,7 +193,12 @@ struct Search<C> {
     key: Arc<SearchKey>,
 }
 impl<C: 'static> Search<C> {
-    fn new(column: C, configuration: &'static str, value: &Value, target: Target) -> Result<Self> {
+    fn new(
+        column: C,
+        configuration: &'static str,
+        value: &SearchTerm,
+        target: Target,
+    ) -> Result<Self> {
         ensure!(
             !configuration.is_empty()
                 && configuration
@@ -193,13 +206,16 @@ impl<C: 'static> Search<C> {
                     .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.'),
             "text-search configuration must be a static, optionally schema-qualified ASCII name"
         );
+        if value.kind == SearchKind::Prefix {
+            SearchTerm::prefix(&value.text)?;
+        }
         Ok(Self {
             column,
             key: Arc::new(SearchKey {
                 column: TypeId::of::<C>(),
                 configuration,
                 query: value.text.clone(),
-                phrase: value.quoted,
+                kind: value.kind,
                 target,
             }),
         })
@@ -233,15 +249,27 @@ impl<C: QueryFragment<Pg>> Search<C> {
         Ok(())
     }
     fn tsquery<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> QueryResult<()> {
-        out.push_sql(if self.key.phrase {
-            "phraseto_tsquery('"
+        if self.key.kind == SearchKind::Prefix {
+            // Normalize once using the document configuration. Serialize each
+            // lexeme using tsquery (not SQL string) escaping, then cast directly
+            // to tsquery so dictionaries cannot normalize lexemes a second time.
+            // The scalar subquery is independent of the row and index eligible.
+            out.push_sql("(SELECT COALESCE(string_agg(chr(39) || replace(replace(lexeme, chr(92), chr(92) || chr(92)), chr(39), chr(39) || chr(39)) || chr(39) || ':*', ' & ' ORDER BY lexeme), '')::tsquery FROM unnest(tsvector_to_array(to_tsvector('");
+            out.push_sql(self.key.configuration);
+            out.push_sql("'::regconfig, ");
+            out.push_bind_param::<Text, _>(&self.key.query)?;
+            out.push_sql("))) AS aip160_prefix(lexeme))");
         } else {
-            "plainto_tsquery('"
-        });
-        out.push_sql(self.key.configuration);
-        out.push_sql("'::regconfig, ");
-        out.push_bind_param::<Text, _>(&self.key.query)?;
-        out.push_sql(")");
+            out.push_sql(if self.key.kind == SearchKind::Phrase {
+                "phraseto_tsquery('"
+            } else {
+                "plainto_tsquery('"
+            });
+            out.push_sql(self.key.configuration);
+            out.push_sql("'::regconfig, ");
+            out.push_bind_param::<Text, _>(&self.key.query)?;
+            out.push_sql(")");
+        }
         Ok(())
     }
 }
