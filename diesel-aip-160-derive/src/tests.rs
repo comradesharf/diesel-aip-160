@@ -183,6 +183,14 @@ fn search_configuration_generates_separate_hooks_and_explicit_targets() {
     };
     let output = compact(filter::expand(input).unwrap());
     for expected in [
+        "fncompile_query_filter",
+        "QueryFilterCompiler",
+        "fnquery_field_search",
+        "fnquery_global_search",
+        "fnquery_custom_compare",
+        "search::postgres::vector_query(records::document",
+        "::search_query(value)",
+        "::compare_query(records::code",
         "fnfield_search",
         "fnglobal_search",
         "SearchAdapter<records::table>",

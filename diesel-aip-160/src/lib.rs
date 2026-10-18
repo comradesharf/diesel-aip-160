@@ -1,29 +1,4 @@
-//! Parse AIP-160 filters and compile typed, parameterized Diesel predicates.
-//!
-//! The [`parser`] and [`compiler`] work without a database backend. Enable one
-//! of `sqlite`, `mysql`, or `postgres` to use [`Aip160Filter`] on Diesel models.
-//! Backend features are mutually exclusive. PostgreSQL additionally supports
-//! JSONB filtering with [`Aip160Jsonb`].
-//!
-//! Text search defaults to escaped case-insensitive substrings. Field
-//! `#[aip160(search(postgres, configuration = "english"))]` opts into PostgreSQL
-//! full-text search (quoted phrases, unquoted plain terms). Optional
-//! `vector = table::document` targets a stored search document explicitly.
-//! Field `search_adapter` and model `global_search_adapter` select independent
-//! `diesel_helpers::SearchAdapter` implementations on any backend. Default
-//! global search ORs field searches; an explicit global adapter replaces it.
-//! Search preserves SQL NULL under NOT. Database setup, index maintenance,
-//! relevance, and ordering remain application-owned. See `search` and the
-//! `postgres_search` example for target and configuration requirements.
-//!
-//! ```
-//! use diesel_aip_160::parser::parse_filter;
-//!
-//! let expression = parse_filter("name=Alice AND id>=10")?;
-//! assert!(expression.is_some());
-//! assert!(parse_filter("   ")?.is_none());
-//! # Ok::<(), diesel_aip_160::anyhow::Error>(())
-//! ```
+#![doc = include_str!("../README.md")]
 
 pub mod compiler;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
@@ -35,7 +10,15 @@ pub mod parser;
 #[doc(hidden)]
 pub mod pg_enum;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
+pub mod ranking;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
 pub mod search;
+
+pub use compiler::QueryFilter;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
+pub use diesel_helpers::{Backend, FieldAdapter, Predicate, SearchAdapter};
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
+pub use ranking::{CompiledQueryFilter, Direction, Ordering, RankingExpression, RankingSignal};
 
 pub use anyhow;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
@@ -43,13 +26,16 @@ pub use diesel;
 pub use diesel_aip_160_derive::{Aip160Filter, Aip160Jsonb, Aip160PgEnum};
 pub use serde_json;
 
-/// Split a JSONB field name into a column-relative path. The caller supplies
-/// only column names explicitly registered by the derive macro.
+/// Map a filter's first JSONB path segment to its stored JSON key.
+///
+/// Derived structs accept their registered Rust field names. `serde_json::Value`
+/// accepts arbitrary keys. Later segments use stored JSON keys directly.
 #[diagnostic::on_unimplemented(
     message = "unsupported Aip160Filter field type `{Self}`",
     label = "use #[aip160(adapter = MyAdapter)] for custom fields, #[aip160(skip)] to exclude it, or derive Aip160Jsonb for a JSONB field"
 )]
 pub trait JsonbPath {
+    /// Return the stored key, or `None` if this field is not registered.
     fn stored_key(field: &str) -> Option<&str>;
 }
 
@@ -59,6 +45,9 @@ impl JsonbPath for serde_json::Value {
     }
 }
 
+/// Resolve a field name relative to an explicitly registered JSONB column.
+/// The root column returns an empty path; unknown roots or mapped fields return
+/// `None`. The derive supplies the trusted column name.
 pub fn json_path<T: JsonbPath>(field: &str, column: &str) -> Option<Vec<String>> {
     if field == column {
         return Some(Vec::new());

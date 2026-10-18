@@ -33,6 +33,13 @@ struct Article {
 
 struct CombinedDocument;
 impl SearchAdapter<articles::table> for CombinedDocument {
+    fn search_query(
+        value: &Value,
+    ) -> diesel_aip_160::anyhow::Result<diesel_aip_160::ranking::CompiledQueryFilter<articles::table>>
+    {
+        postgres::vector_query(articles::document, "english", value)
+    }
+
     fn search(value: &Value) -> diesel_aip_160::anyhow::Result<Predicate<articles::table>> {
         postgres::vector(articles::document, "english", value)
     }
@@ -44,5 +51,15 @@ fn main() -> diesel_aip_160::anyhow::Result<()> {
     let predicate = Article::compile_filter(filter)?.unwrap();
     let query = articles::table.filter(predicate).select(articles::id);
     println!("{}", diesel::debug_query::<diesel::pg::Pg, _>(&query));
+    let mut compiled = Article::compile_query_filter(filter)?.unwrap();
+    let order = compiled.ordering(&["relevance"])?;
+    let ranked = articles::table
+        .filter(compiled.predicate)
+        .select(articles::id)
+        .order(order)
+        .then_order_by(articles::id)
+        .limit(20)
+        .offset(40);
+    println!("{}", diesel::debug_query::<diesel::pg::Pg, _>(&ranked));
     Ok(())
 }

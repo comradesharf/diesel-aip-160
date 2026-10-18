@@ -3,6 +3,7 @@
 use super::parser::{self, Argument, Comparable, Comparator, Expression, Value};
 use anyhow::{Result, bail, ensure};
 
+/// Scalar comparison delivered to custom field adapters; `:` maps to `Equal`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComparisonOperator {
     Equal,
@@ -85,6 +86,156 @@ pub fn compile<C: Aip160FilterCompiler>(
     parser::parse_filter(source)?
         .map(|expression| compile_expression(&expression, compiler, None))
         .transpose()
+}
+
+/// A predicate and the independent ranking contributions produced by an operation.
+pub struct QueryFilter<P, S> {
+    /// Predicate truth is independent of whether the caller selects an ordering.
+    pub predicate: P,
+    /// Independent contributions; generic composition does not normalize metrics.
+    pub signals: Vec<S>,
+}
+
+impl<P, S> QueryFilter<P, S> {
+    /// Construct a predicate-only result, with no ranking contributions.
+    pub fn predicate(predicate: P) -> Self {
+        Self {
+            predicate,
+            signals: Vec::new(),
+        }
+    }
+    fn combine(self, other: Self, combine: impl FnOnce(P, P) -> P) -> Self {
+        let mut signals = self.signals;
+        signals.extend(other.signals);
+        Self {
+            predicate: combine(self.predicate, other.predicate),
+            signals,
+        }
+    }
+}
+
+/// Opt-in extension of the existing compiler. Default hooks preserve existing
+/// predicates and emit no signals. Composition retains positive leaf signals,
+/// including leaves in unmatched OR branches. An odd number of NOTs suppresses
+/// a signal; double negation restores it. Adapters own metric semantics.
+pub trait QueryFilterCompiler: Aip160FilterCompiler {
+    /// Application-selected metric representation. Diesel derives use `RankingSignal`.
+    type Signal;
+    /// Compile one registered field search; defaults to predicate-only behavior.
+    fn query_field_search(
+        &self,
+        field: &str,
+        value: &Value,
+    ) -> Result<QueryFilter<Self::Predicate, Self::Signal>> {
+        self.field_search(field, value).map(QueryFilter::predicate)
+    }
+    /// Compile one bare term. The default preserves `global_search` overrides.
+    /// Use `query_global_fields` to collect ranked searches from registered fields.
+    fn query_global_search(
+        &self,
+        value: &Value,
+    ) -> Result<QueryFilter<Self::Predicate, Self::Signal>> {
+        self.global_search(value).map(QueryFilter::predicate)
+    }
+    /// Compile a custom comparison after shared presence/NULL validation.
+    fn query_custom_compare(
+        &self,
+        field: &str,
+        operator: ComparisonOperator,
+        value: &Value,
+    ) -> Result<QueryFilter<Self::Predicate, Self::Signal>> {
+        self.custom_compare(field, operator, value)
+            .map(QueryFilter::predicate)
+    }
+    /// Apply an operation-specific policy after negative contributions are removed.
+    /// The default retains independent signals exactly as returned by the hooks.
+    fn finish_signals(&self, signals: Vec<Self::Signal>) -> Result<Vec<Self::Signal>> {
+        Ok(signals)
+    }
+}
+
+/// Expand a global search using the same registered fields as predicate compilation.
+pub fn query_global_fields<C: QueryFilterCompiler>(
+    compiler: &C,
+    value: &Value,
+) -> Result<QueryFilter<C::Predicate, C::Signal>> {
+    let mut fields = compiler.text_fields().iter();
+    let first = fields
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("global search is not supported"))?;
+    fields.try_fold(compiler.query_field_search(first, value)?, |left, field| {
+        let right = compiler.query_field_search(field, value)?;
+        Ok(left.combine(right, |a, b| compiler.or(a, b)))
+    })
+}
+
+/// Parse and validate once through the existing compiler, carrying signals with
+/// each predicate. No model registration or second AST walk is needed.
+pub fn compile_query<C: QueryFilterCompiler>(
+    source: &str,
+    compiler: &C,
+) -> Result<Option<QueryFilter<C::Predicate, C::Signal>>> {
+    compile(source, &WithSignals(compiler))?
+        .map(|result| {
+            let signals = result
+                .signals
+                .into_iter()
+                .filter_map(|(positive, signal)| positive.then_some(signal))
+                .collect();
+            Ok(QueryFilter {
+                predicate: result.predicate,
+                signals: compiler.finish_signals(signals)?,
+            })
+        })
+        .transpose()
+}
+
+struct WithSignals<'a, C>(&'a C);
+impl<C: QueryFilterCompiler> Aip160FilterCompiler for WithSignals<'_, C> {
+    type Predicate = QueryFilter<C::Predicate, (bool, C::Signal)>;
+    fn native_compare(&self, f: &str, o: Comparator, v: &Value) -> Result<Self::Predicate> {
+        self.0.native_compare(f, o, v).map(QueryFilter::predicate)
+    }
+    fn custom_compare(&self, f: &str, o: ComparisonOperator, v: &Value) -> Result<Self::Predicate> {
+        self.0.query_custom_compare(f, o, v).map(mark_positive)
+    }
+    fn field_search(&self, f: &str, v: &Value) -> Result<Self::Predicate> {
+        self.0.query_field_search(f, v).map(mark_positive)
+    }
+    fn global_search(&self, v: &Value) -> Result<Self::Predicate> {
+        self.0.query_global_search(v).map(mark_positive)
+    }
+    fn constant(&self, v: bool) -> Self::Predicate {
+        QueryFilter::predicate(self.0.constant(v))
+    }
+    fn field_type(&self, f: &str) -> Result<FieldType> {
+        self.0.field_type(f)
+    }
+    fn text_fields(&self) -> &'static [&'static str] {
+        self.0.text_fields()
+    }
+    fn ilike(&self, f: &str, p: String) -> Result<Self::Predicate> {
+        self.0.ilike(f, p).map(QueryFilter::predicate)
+    }
+    fn and(&self, a: Self::Predicate, b: Self::Predicate) -> Self::Predicate {
+        a.combine(b, |left, right| self.0.and(left, right))
+    }
+    fn or(&self, a: Self::Predicate, b: Self::Predicate) -> Self::Predicate {
+        a.combine(b, |left, right| self.0.or(left, right))
+    }
+    fn not(&self, mut a: Self::Predicate) -> Self::Predicate {
+        a.predicate = self.0.not(a.predicate);
+        for (positive, _) in &mut a.signals {
+            *positive = !*positive;
+        }
+        a
+    }
+}
+fn mark_positive<P, S>(q: QueryFilter<P, S>) -> QueryFilter<P, (bool, S)> {
+    QueryFilter {
+        predicate: q.predicate,
+        signals: q.signals.into_iter().map(|s| (true, s)).collect(),
+    }
 }
 
 fn compile_expression<C: Aip160FilterCompiler>(
@@ -588,6 +739,65 @@ mod tests {
         for source in ["name:*", "name:null", "name='a*'", "payload.details:diesel"] {
             assert_eq!(run(source), compiled(source));
         }
+    }
+
+    #[test]
+    fn query_compilation_dispatches_each_operation_once_and_keeps_boolean_truth() {
+        use std::cell::Cell;
+        struct Counting(Cell<usize>);
+        impl Aip160FilterCompiler for Counting {
+            type Predicate = Predicate;
+            fn native_compare(&self, f: &str, o: Comparator, v: &Value) -> Result<Predicate> {
+                self.0.set(self.0.get() + 1);
+                TestCompiler(&[]).native_compare(f, o, v)
+            }
+            fn field_type(&self, f: &str) -> Result<FieldType> {
+                TestCompiler(&[]).field_type(f)
+            }
+            fn text_fields(&self) -> &'static [&'static str] {
+                &["name"]
+            }
+            fn ilike(&self, _: &str, _: String) -> Result<Predicate> {
+                panic!("ranked operation must not compile its predicate a second time")
+            }
+            fn constant(&self, v: bool) -> Predicate {
+                TestCompiler(&[]).constant(v)
+            }
+            fn and(&self, a: Predicate, b: Predicate) -> Predicate {
+                TestCompiler(&[]).and(a, b)
+            }
+            fn or(&self, a: Predicate, b: Predicate) -> Predicate {
+                TestCompiler(&[]).or(a, b)
+            }
+            fn not(&self, a: Predicate) -> Predicate {
+                TestCompiler(&[]).not(a)
+            }
+        }
+        impl QueryFilterCompiler for Counting {
+            type Signal = String;
+            fn query_field_search(
+                &self,
+                f: &str,
+                v: &Value,
+            ) -> Result<QueryFilter<Predicate, String>> {
+                self.0.set(self.0.get() + 1);
+                Ok(QueryFilter {
+                    predicate: TestCompiler(&[]).field_search(f, v)?,
+                    signals: vec![v.text.clone()],
+                })
+            }
+            fn query_global_search(&self, v: &Value) -> Result<QueryFilter<Predicate, String>> {
+                query_global_fields(self, v)
+            }
+        }
+        let source = "name:(diesel OR NOT engine) AND age>=3 AND NOT (NOT manual)";
+        let compiler = Counting(Cell::new(0));
+        let result = compile_query(source, &compiler).unwrap().unwrap();
+        assert_eq!(compiler.0.get(), 4);
+        assert_eq!(result.signals, ["diesel", "manual"]);
+        assert_eq!(result.predicate, compiled(source));
+        assert!(compile_query("name=(age=3)", &compiler).is_err());
+        assert!(compile_query("", &compiler).unwrap().is_none());
     }
 
     #[test]

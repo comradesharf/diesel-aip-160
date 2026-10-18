@@ -5,6 +5,9 @@ use syn::{DeriveInput, GenericArgument, PathArguments, Type};
 
 use crate::attributes::{named_fields, options};
 
+mod field_options;
+use field_options::{FieldOptions, Search, field_options};
+
 pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut global_search = None;
     for attribute in &input.attrs {
@@ -58,6 +61,8 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     let mut texts = Vec::new();
     let mut ilikes = Vec::new();
     let mut searches = Vec::new();
+    let mut query_searches = Vec::new();
+    let mut query_customs = Vec::new();
     let mut postgres_search = false;
     for field in &fields.named {
         let FieldOptions {
@@ -74,6 +79,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         let (ty, nullable) = unwrap_option(&field.ty);
         let column = quote!(#table::#ident);
         if let Some(search_adapter) = search_adapter {
+            query_searches.push(quote!(#name => <#search_adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search_query(value),));
             searches.push(quote!(#name => <#search_adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search(value),));
             // Explicit search adapters opt custom fields into global expansion too.
             texts.push(quote!(fields.push(#name);));
@@ -90,18 +96,21 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 ));
             }
             postgres_search = true;
-            let expression = if let Some(vector) = vector {
-                quote!(::diesel_aip_160::search::postgres::vector(#vector, #configuration, value))
+            let (target, function) = if let Some(vector) = vector {
+                (quote!(#vector), format_ident!("vector"))
             } else {
-                quote!(::diesel_aip_160::search::postgres::text(#column, #configuration, value))
+                (column.clone(), format_ident!("text"))
             };
-            searches.push(quote!(#name => #expression,));
+            let query_function = format_ident!("{}_query", function);
+            searches.push(quote!(#name => ::diesel_aip_160::search::postgres::#function(#target, #configuration, value),));
+            query_searches.push(quote!(#name => ::diesel_aip_160::search::postgres::#query_function(#target, #configuration, value),));
             texts.push(quote!(fields.push(#name);));
         } else if adapter.is_none() {
             texts.push(quote!(if <#ty>::__aip160_is_text(#column) { fields.push(#name); }));
         }
         if let Some(adapter) = adapter {
             types.push(quote!(if field == #name { return Ok(::diesel_aip_160::compiler::FieldType::Custom { nullable: #nullable }); }));
+            query_customs.push(quote!(#name => <#adapter as ::diesel_aip_160::diesel_helpers::FieldAdapter<#column>>::compare_query(#column, operator, value),));
             customs.push(quote!(#name => <#adapter as ::diesel_aip_160::diesel_helpers::FieldAdapter<#column>>::compare(#column, operator, value),));
             continue;
         }
@@ -113,6 +122,11 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         );
         ilikes.push(quote!(#name => <#ty>::__aip160_like(#column, pattern, true),));
     }
+    let query_global_search = if let Some(adapter) = &global_search {
+        quote!(<#adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search_query(value))
+    } else {
+        quote!(::diesel_aip_160::compiler::query_global_fields(self, value))
+    };
     let global_search = global_search.map(|adapter| quote! {
         fn global_search(&self, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<Self::Predicate> {
             <#adapter as ::diesel_aip_160::diesel_helpers::SearchAdapter<#table::table>>::search(value)
@@ -123,11 +137,34 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
     Ok(quote! {
         #backend_check
         impl #model {
+            pub fn compile_query_filter(source: &str) -> ::diesel_aip_160::anyhow::Result<Option<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>>> {
+                ::diesel_aip_160::compiler::compile_query(source, &#compiler)
+            }
+
             pub fn compile_filter(source: &str) -> ::diesel_aip_160::anyhow::Result<Option<::diesel_aip_160::diesel_helpers::Predicate<#table::table>>> {
                 ::diesel_aip_160::compiler::compile(source, &#compiler)
             }
         }
         pub struct #compiler;
+        impl ::diesel_aip_160::compiler::QueryFilterCompiler for #compiler {
+            type Signal = ::diesel_aip_160::ranking::RankingSignal<#table::table>;
+            fn query_field_search(&self, field: &str, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
+                match field {
+                    #(#query_searches)*
+                    _ => ::diesel_aip_160::compiler::Aip160FilterCompiler::field_search(self, field, value).map(::diesel_aip_160::compiler::QueryFilter::predicate),
+                }
+            }
+            fn query_global_search(&self, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
+                #query_global_search
+            }
+            fn query_custom_compare(&self, field: &str, operator: ::diesel_aip_160::compiler::ComparisonOperator, value: &::diesel_aip_160::parser::Value) -> ::diesel_aip_160::anyhow::Result<::diesel_aip_160::ranking::CompiledQueryFilter<#table::table>> {
+                match field { #(#query_customs)* _ => ::diesel_aip_160::anyhow::bail!("unknown adapter field `{field}`"), }
+            }
+            fn finish_signals(&self, signals: Vec<Self::Signal>) -> ::diesel_aip_160::anyhow::Result<Vec<Self::Signal>> {
+                Ok(::diesel_aip_160::search::finish_signals(signals))
+            }
+        }
+
         impl ::diesel_aip_160::compiler::Aip160FilterCompiler for #compiler {
             type Predicate = ::diesel_aip_160::diesel_helpers::Predicate<#table::table>;
             #global_search
@@ -182,84 +219,6 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             }
         }
     })
-}
-
-struct Search {
-    configuration: syn::LitStr,
-    vector: Option<syn::Path>,
-}
-
-#[derive(Default)]
-struct FieldOptions {
-    skip: bool,
-    adapter: Option<syn::Path>,
-    search_adapter: Option<syn::Path>,
-    search: Option<Search>,
-}
-
-fn field_options(field: &syn::Field) -> syn::Result<FieldOptions> {
-    let mut result = FieldOptions::default();
-    for attribute in &field.attrs {
-        if attribute.path().is_ident("aip160") {
-            attribute.parse_nested_meta(|meta| {
-                if meta.path.is_ident("skip") {
-                    if result.skip { return Err(meta.error("duplicate skip")); }
-                    result.skip = true;
-                } else if meta.path.is_ident("adapter") {
-                    if result.adapter.is_some() { return Err(meta.error("duplicate adapter")); }
-                    result.adapter = Some(meta.value()?.parse()?);
-                } else if meta.path.is_ident("search_adapter") {
-                    if result.search_adapter.is_some() { return Err(meta.error("duplicate search_adapter")); }
-                    result.search_adapter = Some(meta.value()?.parse()?);
-                } else if meta.path.is_ident("search") {
-                    if result.search.is_some() { return Err(meta.error("duplicate search")); }
-                    let mut postgres = false;
-                    let mut configuration = None;
-                    let mut vector = None;
-                    meta.parse_nested_meta(|option| {
-                        if option.path.is_ident("postgres") {
-                            if postgres { return Err(option.error("duplicate postgres")); }
-                            postgres = true;
-                        } else if option.path.is_ident("configuration") {
-                            if configuration.is_some() { return Err(option.error("duplicate configuration")); }
-                            let name: syn::LitStr = option.value()?.parse()?;
-                            if name.value().is_empty() || !name.value().bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.') {
-                                return Err(option.error("configuration must be an optionally schema-qualified ASCII name"));
-                            }
-                            configuration = Some(name);
-                        } else if option.path.is_ident("vector") {
-                            if vector.is_some() { return Err(option.error("duplicate vector")); }
-                            vector = Some(option.value()?.parse()?);
-                        } else {
-                            return Err(option.error("built-in search supports only postgres, configuration = \"english\", and optional vector = path::column; use search_adapter for MySQL/SQLite"));
-                        }
-                        Ok(())
-                    })?;
-                    if !postgres { return Err(meta.error("built-in search requires postgres; MySQL/SQLite require search_adapter")); }
-                    let configuration = configuration.ok_or_else(|| meta.error("search requires an explicit configuration = \"english\""))?;
-                    result.search = Some(Search { configuration, vector });
-                } else {
-                    return Err(meta.error("expected skip, adapter, search_adapter, or search(postgres, configuration = \"english\")"));
-                }
-                Ok(())
-            })?;
-        }
-    }
-    if result.skip
-        && (result.adapter.is_some() || result.search_adapter.is_some() || result.search.is_some())
-    {
-        return Err(syn::Error::new_spanned(
-            field,
-            "skip cannot be combined with adapter or search configuration",
-        ));
-    }
-    if result.search.is_some() && (result.search_adapter.is_some() || result.adapter.is_some()) {
-        return Err(syn::Error::new_spanned(
-            field,
-            "built-in search cannot be combined with search_adapter or adapter; combine adapter and search_adapter for custom types",
-        ));
-    }
-    Ok(result)
 }
 
 fn unwrap_option(ty: &Type) -> (&Type, bool) {

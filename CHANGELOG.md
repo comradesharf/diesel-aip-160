@@ -5,6 +5,35 @@ public APIs and filter behavior; pin the exact version when upgrading.
 
 ## Unreleased
 
+### Added
+
+- Opt-in `compile_query_filter()` compiles predicates and named, typed ranking
+  signals in one traversal using the existing derived field registry.
+- `RankingSignal`, typed expression recovery, and explicit single/priority
+  ordering policies; adapters can opt in with `search_query` / `compare_query`.
+- PostgreSQL `ts_rank_cd` relevance reuses matching configuration and targets,
+  binds query values, scores NULL as zero, and uses strongest positive-match
+  relevance to avoid duplicate boosts. NOT suppresses signals by polarity;
+  unmatched OR branch signals remain available.
+- Full-text and generic distance ordering examples, migration documentation,
+  and SQL/SQLite/PostgreSQL execution coverage. Existing `compile_filter()`
+  and adapter implementations remain compatible.
+
+### Changed
+
+- The runtime crate README now contains the complete guide and SQL reference,
+  and is included directly as the docs.rs landing page. Guide examples run as
+  feature-aware doctests; the workspace README is a navigation/development page.
+- PostgreSQL matching and ranking share one validated search specification;
+  deduplication uses typed identities instead of formatted strings. Search
+  policy and SQL live in `search::postgres`, separate from generic ranking.
+- Ranking signals use Diesel's standard nonaggregate expression bounds, including
+  bound constants. `sql_type` is now an immutable `sql_type()` accessor. Common
+  backend, predicate, adapter, and ranking types are re-exported at the crate root.
+- Finalized text composites no longer carry a single leaf's deduplication identity.
+  Reusing a compiled score through an adapter retains it as an independent signal;
+  applications must disambiguate repeated names as with other adapter metrics.
+
 ## 0.1.0-beta.6 — 2026-10-18
 
 ### Added

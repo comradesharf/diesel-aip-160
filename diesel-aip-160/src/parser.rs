@@ -5,23 +5,33 @@
 
 use anyhow::{Result, bail, ensure};
 
+/// Maximum UTF-8 input size accepted by `parse_filter`.
 pub const MAX_FILTER_BYTES: usize = 16_384;
+/// Maximum number of lexical tokens in a filter.
 pub const MAX_TOKENS: usize = 512;
+/// Maximum recursive expression nesting accepted by the parser.
 pub const MAX_NESTING: usize = 32;
 
+/// Parsed Boolean structure, before field and literal validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expression {
+    /// Explicit or whitespace conjunction.
     And(Vec<Expression>),
+    /// Disjunction; binds more tightly than conjunction in AIP-160.
     Or(Vec<Expression>),
+    /// Negation written as `NOT` or a leading minus.
     Not(Box<Expression>),
+    /// A field comparison whose right side may contain a literal group.
     Restriction {
         left: Comparable,
         operator: Comparator,
         right: Argument,
     },
+    /// A bare search term, or an inherited literal inside a restriction.
     Global(Comparable),
 }
 
+/// Syntactic comparison operators. `Has` (`:`) is interpreted by the field type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comparator {
     Equal,
@@ -37,10 +47,13 @@ pub enum Comparator {
 /// the field's type, rather than prematurely converted to numbers or booleans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Value {
+    /// Decoded literal text, without quote delimiters.
     pub text: String,
+    /// Whether the input used quotes; affects NULL, wildcard, and search rules.
     pub quoted: bool,
 }
 
+/// A member/literal or a function call. Functions parse but compilation rejects them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Comparable {
     Member(Vec<Value>),
@@ -50,6 +63,7 @@ pub enum Comparable {
     },
 }
 
+/// A single comparable or a parenthesized expression on a restriction's right side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Argument {
     Comparable(Comparable),
