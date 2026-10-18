@@ -25,7 +25,7 @@ uuid = { version = "1", optional = true }
 bigdecimal = { version = "0.4", optional = true }
 ipnet = { version = "2", optional = true }
 libsqlite3-sys = { version = "0.38", optional = true, features = ["bundled"] }
-diesel-aip-160-derive = { path = "../diesel-aip-160-derive", version = "0.1.0-beta.6" }
+diesel-aip-160-derive = { path = "../diesel-aip-160-derive", version = "0.1.0-beta.7" }
 
 [features]
 default = []

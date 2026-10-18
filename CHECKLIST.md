@@ -34,7 +34,7 @@ codecs, database execution tests, and generic ranking are already implemented.
   formatting, doctest, and strict-rustdoc checks in CI.
 - [ ] Complete item-level documentation for remaining AST variants and native
   helper types. The runtime README is included as the full rustdoc landing page.
-- [ ] Add the license text corresponding to the workspace's selected MIT license.
+- [x] Add the license text corresponding to the workspace's selected MIT license.
 - [ ] Evaluate an older minimum compiler only after testing all dependencies
   and backend combinations; the workspace currently declares Rust 1.99.
 - [ ] Verify package archives before release, publishing the derive crate first
