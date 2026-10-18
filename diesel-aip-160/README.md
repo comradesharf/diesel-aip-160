@@ -52,7 +52,7 @@ and `:*` checks path presence. JSONB is unavailable with SQLite and MySQL.
 
 Filters support `=`, `!=`, `<`, `<=`, `>`, `>=`, `:`, `AND`, `OR`, `NOT`,
 parentheses, and bare text search. Text equality supports `*` wildcards;
-`text:value` and bare text perform case-insensitive substring search using
+by default, `text:value` and bare text perform case-insensitive substring search using
 `LOWER(column) LIKE LOWER(pattern)`. Unicode and locale behavior follow the
 database; SQLite's built-in `LOWER` converts ASCII only. Equality and wildcard
 equality retain their existing operator and collation behavior. `*` is literal
@@ -129,3 +129,27 @@ the former `compare`/`FilterLiteral`, scalar `FieldType` variants, `like`, and
 JSON-specific compiler hooks have been removed. The obsolete scalar/JSON
 helpers in `diesel_helpers` have also been removed; use native filtering or
 construct typed Diesel expressions in a `FieldAdapter`.
+
+## Opt-in search
+
+Field `#[aip160(search(postgres, configuration = "english"))]` enables built-in
+PostgreSQL full-text search for `String`/`Option<String>`. Optional
+`vector = schema::document` explicitly targets a stored `search::postgres::TsVector`
+column instead of `to_tsvector(configuration, source_column)`. Quoted literals
+use phrase search; unquoted literals use ordinary terms. User text is bound.
+NULL propagates through search and NOT. Comparisons and presence checks keep
+their existing semantics.
+
+Field `#[aip160(search_adapter = MySearch)]` and model
+`#[aip160(global_search_adapter = MySearch)]` select an independent
+`diesel_helpers::SearchAdapter<Table>`. Global search defaults to OR across field
+search hooks; a global adapter replaces that expansion. Custom adapters support
+all backends; built-in MySQL/SQLite full-text configurations are rejected.
+
+See [the full search guide](../README.md#opt-in-full-text-search) for query
+semantics, required database/index setup, NULL details, custom adapters, and
+limitations, and run the complete typed-filter example:
+
+```sh
+cargo run -p diesel-aip-160 --example postgres_search --features postgres
+```

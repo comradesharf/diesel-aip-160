@@ -149,3 +149,27 @@ values, choosing numeric or native enum ordering explicitly. `skip` and
 `adapter` cannot be combined. JSONB types still opt in through `JsonbPath` or
 `Aip160Jsonb`. See the runtime's `examples/postgres_enums.rs` for a compiling
 example and live-test instructions.
+
+## Search configuration
+
+`Aip160Filter` accepts these explicit options:
+
+- Field `#[aip160(search(postgres, configuration = "english"))]`: full-text
+  search over the source `String`/`Option<String>` column, using an explicit
+  PostgreSQL configuration.
+- Optional `vector = schema::document` inside `search(...)`: search a registered
+  stored `search::postgres::TsVector` column on the model's table.
+- Field `#[aip160(search_adapter = path::Search)]`: custom
+  `diesel_helpers::SearchAdapter<Table>`, independent of the comparison adapter.
+  It may coexist with `adapter = path::FieldAdapter`.
+- Model `#[aip160(global_search_adapter = path::Search)]`: replace default OR
+  expansion across field searches with one application-defined predicate.
+
+Built-in search cannot coexist with either adapter on the same field. `skip`
+conflicts with all search/adapter options; duplicate or unknown options are
+errors. Built-in MySQL/SQLite configurations and PostgreSQL search under another
+backend are rejected. Other field types need a custom search adapter.
+Quoted built-in searches are PostgreSQL lexeme phrases; unquoted values are
+ordinary terms. Presence, NULL checks, equality, and containment are unchanged.
+See the [search guide](../README.md#opt-in-full-text-search) for complete examples,
+database requirements, NULL semantics, and custom adapter responsibilities.

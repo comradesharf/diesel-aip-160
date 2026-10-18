@@ -26,3 +26,16 @@ pub trait FieldAdapter<C: Column> {
         value: &crate::parser::Value,
     ) -> Result<Predicate<C::Table>>;
 }
+
+/// Application-owned search over a model's table, independent of `FieldAdapter`.
+/// Selected with field `#[aip160(search_adapter = MySearch)]` or model
+/// `#[aip160(global_search_adapter = MySearch)]`. Field search adapters receive `:`
+/// literals (except unquoted `*`/`null`); global adapters receive every bare term.
+/// The original text and quoting are preserved. Choose and document query
+/// semantics, bind user input, and use only trusted SQL structure/identifiers.
+/// Preserve SQL NULL semantics, including under NOT (avoid COALESCE unless the
+/// application's search document deliberately defines missing text as empty).
+/// The returned predicate may target any registered column or expression on Table.
+pub trait SearchAdapter<Table> {
+    fn search(value: &crate::parser::Value) -> Result<Predicate<Table>>;
+}

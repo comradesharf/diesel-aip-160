@@ -5,6 +5,17 @@
 //! Backend features are mutually exclusive. PostgreSQL additionally supports
 //! JSONB filtering with [`Aip160Jsonb`].
 //!
+//! Text search defaults to escaped case-insensitive substrings. Field
+//! `#[aip160(search(postgres, configuration = "english"))]` opts into PostgreSQL
+//! full-text search (quoted phrases, unquoted plain terms). Optional
+//! `vector = table::document` targets a stored search document explicitly.
+//! Field `search_adapter` and model `global_search_adapter` select independent
+//! `diesel_helpers::SearchAdapter` implementations on any backend. Default
+//! global search ORs field searches; an explicit global adapter replaces it.
+//! Search preserves SQL NULL under NOT. Database setup, index maintenance,
+//! relevance, and ordering remain application-owned. See `search` and the
+//! `postgres_search` example for target and configuration requirements.
+//!
 //! ```
 //! use diesel_aip_160::parser::parse_filter;
 //!
@@ -23,6 +34,8 @@ pub mod parser;
 #[cfg(feature = "postgres")]
 #[doc(hidden)]
 pub mod pg_enum;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
+pub mod search;
 
 pub use anyhow;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres"))]
