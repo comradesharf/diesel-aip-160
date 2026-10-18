@@ -1,4 +1,4 @@
-# Releasing 0.1.0-beta.5
+# Releasing 0.1.0-beta.6
 
 Release notes and migration guidance are in [CHANGELOG.md](CHANGELOG.md).
 Both crates use the workspace version; publish the derive crate first so the
@@ -38,26 +38,29 @@ cargo publish -p diesel-aip-160 --locked
 After both versions are published, tag the release commit and push the tag:
 
 ```sh
-git tag -a v0.1.0-beta.5 -m 'Release 0.1.0-beta.5'
-git push origin v0.1.0-beta.5
+git tag -a v0.1.0-beta.6 -m 'Release 0.1.0-beta.6'
+git push origin v0.1.0-beta.6
 ```
 
-Use the beta.5 changelog section as the release description. Package dry runs,
+Use the beta.6 changelog section as the release description. Package dry runs,
 publication, and tagging are separate steps; preparing these files does not
 publish a release.
 
 ## Preparation checks (2026-10-18)
 
-- Formatting and workspace tests passed with the locked dependencies offline
-  using Rust 1.99.0.
+- Formatting and workspace tests passed with locked dependencies offline using
+  the pinned Rust 1.99.0 toolchain.
 - All-target tests passed separately for SQLite, MySQL, and PostgreSQL with
-  `native-types`, including enum SQL generation and SQLite database execution
-  and temporal precision tests.
-- `./scripts/test-native-types.sh` passed using Rust 1.99.1 in Docker, including
-  PostgreSQL/MySQL database execution, the ignored PostgreSQL enum tests, and
-  bundled SQLite execution.
+  `native-types`, including search adapter and PostgreSQL full-text SQL tests.
+- The Docker PostgreSQL and MySQL suites passed with Rust 1.99.1, including
+  ignored enum and full-text database execution tests. The normal script hit
+  an existing host-port allocation; the same Compose test services were run
+  under project `aip160-beta6-release` with host database ports disabled.
 - `cargo package -p diesel-aip-160-derive --locked --offline --allow-dirty`
-  built and verified the beta.5 derive archive successfully.
-- Runtime packaging was attempted offline and could not resolve
-  `diesel-aip-160-derive ^0.1.0-beta.5` from the local crates.io index. Repeat
+  built and verified the beta.6 derive archive successfully.
+- The runtime package file list includes the search module, example, and tests.
+  Runtime archive verification was attempted offline but could not resolve
+  `diesel-aip-160-derive ^0.1.0-beta.6` from the local crates.io index. Repeat
   its dry run after publishing the derive crate.
+- The bundled SQLite Docker suite passed, including native database execution,
+  temporal precision, and custom search adapter execution tests.
