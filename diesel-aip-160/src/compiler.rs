@@ -47,7 +47,30 @@ pub trait Aip160FilterCompiler {
     fn or(&self, left: Self::Predicate, right: Self::Predicate) -> Self::Predicate;
     fn not(&self, predicate: Self::Predicate) -> Self::Predicate;
     fn field_type(&self, field: &str) -> Result<FieldType>;
+    /// Searchable field names. Include explicitly registered custom search
+    /// fields here as well as ordinary text fields. Nontext containment fields
+    /// must be omitted unless they deliberately opt into a search adapter.
     fn text_fields(&self) -> &'static [&'static str];
+    /// Search a registered field using the original literal, including quoting.
+    /// The default is an escaped, case-insensitive substring match. Compilation
+    /// routes `:` here only for registered searchable fields; unquoted `*` and
+    /// `null` retain their existing presence/comparison dispatch.
+    fn field_search(&self, field: &str, value: &Value) -> Result<Self::Predicate> {
+        self.ilike(field, substring_pattern(&value.text))
+    }
+
+    /// Search a global term. By default, OR together each registered text field's
+    /// `field_search`, so field-specific search configuration also applies here.
+    fn global_search(&self, value: &Value) -> Result<Self::Predicate> {
+        let mut fields = self.text_fields().iter();
+        let first = fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("global search is not supported"))?;
+        fields.try_fold(self.field_search(first, value)?, |left, field| {
+            Ok(self.or(left, self.field_search(field, value)?))
+        })
+    }
+
     /// Match an escaped substring pattern without regard to case, preserving
     /// SQL NULL semantics.
     fn ilike(&self, field: &str, pattern: String) -> Result<Self::Predicate>;
@@ -114,16 +137,8 @@ fn compile_expression<C: Aip160FilterCompiler>(
             if let Some((field, operator)) = restriction {
                 compare(compiler, field, operator, &value)
             } else {
-                // Bare true, false and null are search terms, not boolean constants.
-                let mut fields = compiler.text_fields().iter();
-                let first = fields
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("global search is not supported"))?;
-                let pattern = substring_pattern(&value.text);
-                let predicate = compiler.ilike(first, pattern.clone())?;
-                fields.try_fold(predicate, |left, field| {
-                    Ok(compiler.or(left, compiler.ilike(field, pattern.clone())?))
-                })
+                // Bare true, false and null remain search terms.
+                compiler.global_search(&value)
             }
         }
     }
@@ -180,6 +195,14 @@ fn compare<C: Aip160FilterCompiler>(
     operator: Comparator,
     value: &Value,
 ) -> Result<C::Predicate> {
+    // Presence and NULL validation stay on the comparison path. Nontext
+    // containment never enters the search hooks.
+    if operator == Comparator::Has
+        && (value.quoted || (value.text != "*" && value.text != "null"))
+        && compiler.text_fields().contains(&field)
+    {
+        return compiler.field_search(field, value);
+    }
     match compiler.field_type(field)? {
         FieldType::Native => compiler.native_compare(field, operator, value),
         FieldType::Custom { nullable } => {
@@ -220,6 +243,11 @@ fn comparison_operator(operator: Comparator) -> ComparisonOperator {
     }
 }
 
+#[doc(hidden)]
+pub fn search_pattern(value: &str) -> String {
+    substring_pattern(value)
+}
+
 pub(crate) fn substring_pattern(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -237,6 +265,7 @@ mod tests {
         Native(String, Comparator, Value),
         Custom(String, ComparisonOperator, Value),
         Search(String, String),
+        SearchValue(String, Value),
         Constant(bool),
         And(Box<Self>, Box<Self>),
         Or(Box<Self>, Box<Self>),
@@ -425,6 +454,140 @@ mod tests {
                 Box::new(Predicate::Search("other".into(), "%search%".into()))
             ))
         );
+    }
+
+    struct SearchCompiler {
+        global_override: bool,
+    }
+
+    impl Aip160FilterCompiler for SearchCompiler {
+        type Predicate = Predicate;
+        fn native_compare(&self, field: &str, op: Comparator, value: &Value) -> Result<Predicate> {
+            TestCompiler(&[]).native_compare(field, op, value)
+        }
+        fn field_type(&self, field: &str) -> Result<FieldType> {
+            TestCompiler(&[]).field_type(field)
+        }
+        fn text_fields(&self) -> &'static [&'static str] {
+            &["name", "optional"]
+        }
+        fn ilike(&self, field: &str, pattern: String) -> Result<Predicate> {
+            TestCompiler(&[]).ilike(field, pattern)
+        }
+        fn field_search(&self, field: &str, value: &Value) -> Result<Predicate> {
+            // Record the raw value instead of converting it to a LIKE pattern.
+            Ok(Predicate::SearchValue(field.into(), value.clone()))
+        }
+        fn global_search(&self, value: &Value) -> Result<Predicate> {
+            if self.global_override {
+                return self.field_search("document", value);
+            }
+            // Exercise the actual trait default through a wrapper without an override.
+            compile_default_global(self, value)
+        }
+        fn constant(&self, value: bool) -> Predicate {
+            TestCompiler(&[]).constant(value)
+        }
+        fn and(&self, a: Predicate, b: Predicate) -> Predicate {
+            TestCompiler(&[]).and(a, b)
+        }
+        fn or(&self, a: Predicate, b: Predicate) -> Predicate {
+            TestCompiler(&[]).or(a, b)
+        }
+        fn not(&self, a: Predicate) -> Predicate {
+            TestCompiler(&[]).not(a)
+        }
+    }
+
+    fn compile_default_global(compiler: &SearchCompiler, value: &Value) -> Result<Predicate> {
+        struct DefaultGlobal<'a>(&'a SearchCompiler);
+        impl Aip160FilterCompiler for DefaultGlobal<'_> {
+            type Predicate = Predicate;
+            fn native_compare(&self, f: &str, o: Comparator, v: &Value) -> Result<Predicate> {
+                self.0.native_compare(f, o, v)
+            }
+            fn field_type(&self, f: &str) -> Result<FieldType> {
+                self.0.field_type(f)
+            }
+            fn text_fields(&self) -> &'static [&'static str] {
+                self.0.text_fields()
+            }
+            fn ilike(&self, f: &str, p: String) -> Result<Predicate> {
+                self.0.ilike(f, p)
+            }
+            fn field_search(&self, f: &str, v: &Value) -> Result<Predicate> {
+                self.0.field_search(f, v)
+            }
+            fn constant(&self, v: bool) -> Predicate {
+                self.0.constant(v)
+            }
+            fn and(&self, a: Predicate, b: Predicate) -> Predicate {
+                self.0.and(a, b)
+            }
+            fn or(&self, a: Predicate, b: Predicate) -> Predicate {
+                self.0.or(a, b)
+            }
+            fn not(&self, a: Predicate) -> Predicate {
+                self.0.not(a)
+            }
+        }
+        DefaultGlobal(compiler).global_search(value)
+    }
+
+    fn searched(field: &str, text: &str, quoted: bool) -> Predicate {
+        Predicate::SearchValue(field.into(), value(text, quoted))
+    }
+
+    #[test]
+    fn search_hooks_preserve_values_override_global_and_compose() {
+        let compiler = SearchCompiler {
+            global_override: true,
+        };
+        let run = |s| compile(s, &compiler).unwrap().unwrap();
+        for (source, text, quoted) in [
+            ("name:001", "001", false),
+            ("name:'diesel engine'", "diesel engine", true),
+            ("name:'50%_*'", "50%_*", true),
+            ("name:'null'", "null", true),
+            ("name:'*'", "*", true),
+        ] {
+            assert_eq!(run(source), searched("name", text, quoted));
+        }
+        assert_eq!(
+            run("'diesel engine'"),
+            searched("document", "diesel engine", true)
+        );
+        assert_eq!(
+            run("name:diesel engine"),
+            Predicate::And(
+                Box::new(searched("name", "diesel", false)),
+                Box::new(searched("document", "engine", false))
+            )
+        );
+        assert_eq!(
+            run("NOT name:(diesel OR 'engine room') AND age>=001"),
+            Predicate::And(
+                Box::new(Predicate::Not(Box::new(Predicate::Or(
+                    Box::new(searched("name", "diesel", false)),
+                    Box::new(searched("name", "engine room", true))
+                )))),
+                Box::new(native("age", Comparator::GreaterThanOrEqual, "001", false))
+            )
+        );
+        let compiler = SearchCompiler {
+            global_override: false,
+        };
+        assert_eq!(
+            compile("'diesel engine'", &compiler).unwrap(),
+            Some(Predicate::Or(
+                Box::new(searched("name", "diesel engine", true)),
+                Box::new(searched("optional", "diesel engine", true))
+            ))
+        );
+        // Presence, NULL and nontext containment bypass field search.
+        for source in ["name:*", "name:null", "name='a*'", "payload.details:diesel"] {
+            assert_eq!(run(source), compiled(source));
+        }
     }
 
     #[test]

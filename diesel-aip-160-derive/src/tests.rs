@@ -166,3 +166,132 @@ fn unrelated_serde_options_do_not_hide_renames() {
             .contains("rename_all")
     );
 }
+
+#[test]
+fn search_configuration_generates_separate_hooks_and_explicit_targets() {
+    let input = syn::parse_quote! {
+        #[diesel(table_name = records)]
+        #[aip160(global_search_adapter = crate::Combined)]
+        struct Record {
+            #[aip160(search(postgres, configuration = "pg_catalog.english", vector = records::document))]
+            title: Option<String>,
+            #[aip160(adapter = CodeAdapter, search_adapter = CodeSearch)]
+            code: Code,
+            #[aip160(search_adapter = crate::OtherSearch)]
+            note: String,
+        }
+    };
+    let output = compact(filter::expand(input).unwrap());
+    for expected in [
+        "fnfield_search",
+        "fnglobal_search",
+        "SearchAdapter<records::table>",
+        "FieldAdapter<records::code>",
+        "search::postgres::vector(records::document",
+        "__aip160_require_postgres_search!",
+        "fields.push(\"code\")",
+    ] {
+        assert!(output.contains(expected), "{expected}: {output}");
+    }
+    let input = syn::parse_quote! {
+        #[diesel(table_name = records)]
+        struct Record { #[aip160(search(postgres, configuration = "english"))] title: String }
+    };
+    assert!(
+        compact(filter::expand(input).unwrap()).contains("search::postgres::text(records::title")
+    );
+}
+
+#[test]
+fn invalid_search_configuration_has_specific_diagnostics() {
+    for (attributes, message) in [
+        (quote!(skip, search_adapter = A), "skip cannot be combined"),
+        (
+            quote!(search_adapter = A, search_adapter = B),
+            "duplicate search_adapter",
+        ),
+        (quote!(search(postgres)), "explicit configuration"),
+        (
+            quote!(search(mysql, configuration = "english")),
+            "supports only postgres",
+        ),
+        (
+            quote!(search(sqlite, configuration = "english")),
+            "supports only postgres",
+        ),
+        (
+            quote!(search(configuration = "english")),
+            "requires postgres",
+        ),
+        (
+            quote!(search(postgres, configuration = "a';--")),
+            "ASCII name",
+        ),
+        (quote!(search(postgres, configuration = "")), "ASCII name"),
+        (
+            quote!(search(
+                postgres,
+                configuration = "english",
+                configuration = "simple"
+            )),
+            "duplicate configuration",
+        ),
+        (
+            quote!(search(
+                postgres,
+                configuration = "english",
+                vector = a,
+                vector = b
+            )),
+            "duplicate vector",
+        ),
+        (
+            quote!(
+                search(postgres, configuration = "english"),
+                search_adapter = A
+            ),
+            "cannot be combined",
+        ),
+        (
+            quote!(search(postgres, configuration = "english"), adapter = A),
+            "cannot be combined",
+        ),
+        (
+            quote!(
+                search(postgres, configuration = "english"),
+                search(postgres, configuration = "simple")
+            ),
+            "duplicate search",
+        ),
+    ] {
+        let input = syn::parse_quote! {
+            #[diesel(table_name = records)]
+            struct Record { #[aip160(#attributes)] title: String }
+        };
+        let error = filter::expand(input).unwrap_err().to_string();
+        assert!(error.contains(message), "{error}: expected {message}");
+    }
+    for ty in [quote!(i32), quote!(Option<bool>), quote!(serde_json::Value)] {
+        let input = syn::parse_quote! {
+            #[diesel(table_name = records)]
+            struct Record { #[aip160(search(postgres, configuration = "english"))] title: #ty }
+        };
+        assert!(
+            filter::expand(input)
+                .unwrap_err()
+                .to_string()
+                .contains("String or Option<String>")
+        );
+    }
+    let input = syn::parse_quote! {
+        #[diesel(table_name = records)]
+        #[aip160(global_search_adapter = A, global_search_adapter = B)]
+        struct Record { title: String }
+    };
+    assert!(
+        filter::expand(input)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate global_search_adapter")
+    );
+}

@@ -36,7 +36,18 @@ pub fn derive_aip160_pg_enum(input: TokenStream) -> TokenStream {
 /// Generate a typed filter compiler and a `compile_filter` method for a Diesel model.
 ///
 /// Use `#[diesel(table_name = ...)]` to specify the table and `#[aip160(skip)]`
-/// to exclude fields from filtering.
+/// to exclude fields from filtering. Field search opts in with
+/// `#[aip160(search(postgres, configuration = "english"))]`, optionally adding
+/// `vector = table::document` for a stored `search::postgres::TsVector` target.
+/// Built-in search requires PostgreSQL and String/Option<String>; quoted values
+/// are lexeme phrases and unquoted values are plain terms. Database setup is
+/// application-owned. Other backends require custom search adapters.
+/// Field `#[aip160(search_adapter = MySearch)]` and model
+/// `#[aip160(global_search_adapter = MySearch)]` select an independent
+/// `diesel_helpers::SearchAdapter<Table>`. Global search otherwise ORs field
+/// searches. NULL propagates through search/NOT; comparison and presence
+/// semantics are unchanged. `skip` conflicts with search options. Built-in
+/// search conflicts with adapters; `adapter` and `search_adapter` may coexist.
 #[proc_macro_derive(Aip160Filter, attributes(aip160, diesel))]
 pub fn derive_aip160_filter(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

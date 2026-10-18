@@ -3,6 +3,25 @@
 Both workspace crates share the versions below. These beta releases may change
 public APIs and filter behavior; pin the exact version when upgrading.
 
+## Unreleased
+
+### Added
+
+- Default `field_search` and `global_search` compiler hooks receive the original
+  parser value and preserve existing substring defaults. Global search expands
+  through field hooks unless explicitly overridden.
+- Independent `SearchAdapter<Table>` extension point for typed, parameterized
+  field and global predicates on all backends.
+- Explicit derive options `search(postgres, configuration = "english")`,
+  optional `vector = table::document`, field `search_adapter`, and model
+  `global_search_adapter`, with conflict/type/backend diagnostics.
+- PostgreSQL full-text helpers for text expressions and stored `TsVector`
+  targets. Quoted literals use phrase queries; unquoted literals use plain
+  queries. NULL propagates under NOT. Other backend built-ins are explicitly
+  unsupported; comparison, presence, and nontext containment behavior remains.
+- Compiler, derive, SQL-binding, adapter, and database execution tests, plus a
+  complete PostgreSQL search example and database setup documentation.
+
 ## 0.1.0-beta.5 — 2026-10-18
 
 ### Added

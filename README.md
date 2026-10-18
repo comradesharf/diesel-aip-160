@@ -173,7 +173,7 @@ For text `=` and `!=`, `*` is a wildcard even inside quotes. For text `:` and
 global search, `*` is literal except for the unquoted presence check `field:*`.
 SQL LIKE characters `%`, `_`, and backslash are escaped in search patterns.
 
-Text `:` and global search use `LOWER(column) LIKE LOWER(pattern)` on SQLite,
+By default, text `:` and global search use `LOWER(column) LIKE LOWER(pattern)` on SQLite,
 MySQL, and PostgreSQL. For example, `name:ali` matches `Alice`, `ALICE`, and
 `Malik`. Case conversion follows the database's Unicode, locale, and collation
 rules; SQLite's built-in `LOWER` handles ASCII case conversion only. This does
@@ -395,7 +395,7 @@ Implement `diesel_helpers::FieldAdapter<Column>` for the adapter. Its
 registered Diesel column; `Value` preserves literal text and quoting. Validate
 and map the literal before building typed Diesel expressions. Adapters can
 reject unsupported operators. `:` maps to equality for custom fields; text
-wildcard and substring handling never applies. Custom fields are excluded from
+wildcard and substring handling never applies. Custom fields without a search adapter are excluded from
 global text search, and unknown fields or traversals are rejected.
 
 For nullable adapter fields, the compiler allows unquoted `null` only with
@@ -466,6 +466,142 @@ AIP160_TEST_DATABASE_URL=postgres://user:password@localhost/test_db \
 `postgres` continues to enable SQL generation without native libraries;
 `postgres-integration` additionally enables Diesel's PostgreSQL connection driver.
 
+## Opt-in full-text search
+
+Unconfigured models retain the existing escaped, case-insensitive substring
+search. Field search (`title:diesel`) and global search (`diesel`) have separate
+compiler hooks. The default global hook calls field search for every registered
+searchable field and ORs the predicates. Thus it honors each field's search
+configuration. A global adapter replaces this expansion entirely, even on a
+model with no searchable fields.
+
+Built-in full-text search currently supports **PostgreSQL only**. Enable the
+`postgres` feature and opt individual `String` / `Option<String>` fields in:
+
+```rust,ignore
+#[derive(diesel_aip_160::Aip160Filter)]
+#[diesel(table_name = articles)]
+struct Article {
+    id: i32,
+    #[aip160(search(postgres, configuration = "english"))]
+    title: Option<String>,
+    body: Option<String>, // body:manual still uses substring matching.
+    published: bool,
+}
+let predicate = Article::compile_filter(
+    r#"title:"diesel engine" AND body:manual AND published=true AND id>=10"#
+)?.unwrap();
+let query = articles::table.filter(predicate).select(articles::id);
+```
+
+The complete compiling [PostgreSQL search example](diesel-aip-160/examples/postgres_search.rs)
+adds a global adapter over a combined document and prints bound SQL:
+
+```sh
+cargo run -p diesel-aip-160 --example postgres_search --features postgres
+```
+
+The built-in predicate targets `to_tsvector('english'::regconfig, articles.title)`.
+For an expression index, the application must create the **same expression and
+configuration**. It does not search a separate vector automatically. Example
+application-owned SQL (adapt names/types to your schema):
+
+```sql
+CREATE TABLE articles (
+    id integer PRIMARY KEY, title text, body text, published boolean NOT NULL,
+    document tsvector GENERATED ALWAYS AS (
+        to_tsvector('english'::regconfig,
+            coalesce(title, '') || ' ' || coalesce(body, ''))
+    ) STORED
+);
+CREATE INDEX articles_title_fts ON articles USING GIN
+    (to_tsvector('english'::regconfig, title));
+CREATE INDEX articles_document_fts ON articles USING GIN (document);
+```
+
+To explicitly search an existing vector for a field, use
+`#[aip160(search(postgres, configuration = "english", vector = articles::document))]`.
+Declare that schema column as `search::postgres::TsVector` or
+`Nullable<TsVector>`. The field itself remains a `String`/`Option<String>` with
+ordinary comparisons and presence checks against its original column. The
+`vector` target must belong to the model's table. The query configuration must
+match the document's construction configuration; the compiler cannot verify
+database setup. Static configuration names accept ASCII letters, digits,
+underscores, and dots (for schema qualification).
+
+PostgreSQL uses `plainto_tsquery` for unquoted literals and `phraseto_tsquery` for
+quoted literals. A quoted multiword value means an ordered lexeme phrase,
+including stop-word distances, rather than an exact byte substring. Stemming,
+stop words, and tokenization follow the explicit configuration. Empty or
+stop-word-only queries match no rows. User punctuation is processed as plain
+text, without interpreting tsquery operators, prefixes, or wildcards.
+
+The filter grammar is unchanged: `title:"diesel engine"` is one phrase search;
+`title:diesel engine` is a title term AND a separate global term. Both quote
+styles supported by the parser set the phrase flag. AND, OR, NOT, grouping,
+composite field arguments, implicit AND, and AIP-160's OR-before-AND precedence
+are unchanged. Unconfigured fields still treat quoted multiword searches as
+substrings.
+
+Only search changes. Equality, inequality, ordering, wildcard equality, NULL
+checks, `field:*`, and nontext containment retain their behavior. Unquoted
+`field:null` stays on the comparison path (and remains invalid for nullable
+text); quoted `field:"null"` searches text. Required text retains its previous
+literal `field:null` behavior. Global `null` and `*` remain search terms.
+NULL search targets produce SQL NULL, also under NOT, so neither a search nor
+its negation selects a NULL target. A global OR may still match another field.
+Applications may deliberately build combined documents with `coalesce`, as
+above, giving that document empty text for missing source columns.
+
+### Custom search adapters
+
+`diesel_helpers::SearchAdapter<Table>` is independent of `FieldAdapter<Column>`.
+It receives `&parser::Value` with original text and quoting and returns
+`anyhow::Result<Predicate<Table>>`, a typed, boxed Diesel boolean expression.
+Use `#[aip160(search_adapter = MySearch)]` on a field, or
+`#[aip160(global_search_adapter = CombinedDocument)]` on a model:
+
+```rust,ignore
+struct CombinedDocument;
+impl diesel_aip_160::diesel_helpers::SearchAdapter<articles::table> for CombinedDocument {
+    fn search(value: &diesel_aip_160::parser::Value)
+        -> diesel_aip_160::anyhow::Result<diesel_aip_160::diesel_helpers::Predicate<articles::table>>
+    {
+        diesel_aip_160::search::postgres::vector(articles::document, "english", value)
+    }
+}
+```
+
+Adapters can choose other registered targets or application-defined expressions
+and query semantics. They must bind input and preserve SQL NULL behavior;
+identifiers and SQL structure must come from trusted application code. Nullable
+Diesel expressions can use `assume_not_null()` for the boxed Bool metadata; this
+does not alter SQL NULL propagation. Search never passes through
+`ComparisonOperator`, which continues to map `:` to equality for custom field
+comparisons without a search adapter. Search adapters opt their field into
+default global search, including fields also using `adapter = MyFieldAdapter`.
+Unquoted `:*` and `:null` bypass field search adapters and retain comparison
+validation. Built-in search cannot be combined with `adapter` or
+`search_adapter`; `skip` cannot be combined with any adapter/search option.
+Other field types require custom search adapters.
+
+Custom adapters work on PostgreSQL, MySQL, and SQLite. Built-in `search(mysql, ...)`
+and `search(sqlite, ...)` are rejected, as is a PostgreSQL search configuration
+compiled with a different backend; explicit full-text requests never silently
+fall back to substring matching. MySQL requires a suitable FULLTEXT index and
+MATCH column list. SQLite FTS5 requires an FTS virtual table and MATCH target,
+usually related to source rows through rowid. Implement those application-specific
+targets in an adapter; binding query text does not neutralize the backend's own
+query language, so adapters must define and validate their query semantics.
+
+Official backend requirements:
+[PostgreSQL query semantics](https://www.postgresql.org/docs/current/textsearch-controls.html),
+[PostgreSQL tables and indexes](https://www.postgresql.org/docs/current/textsearch-tables.html),
+[MySQL FULLTEXT/MATCH](https://dev.mysql.com/doc/refman/8.4/en/fulltext-natural-language.html),
+and [SQLite FTS5](https://www.sqlite.org/fts5.html).
+The compiler creates no migrations, indexes, or search documents and manages no
+maintenance triggers, ranking scores, or result ordering.
+
 ## Compiler API
 
 [`compiler.rs`](diesel-aip-160/src/compiler.rs) exposes
@@ -486,7 +622,9 @@ type. Supply field types, searchable text fields, constants, and logical
 composition. Return `FieldType::Native` for built-in fields and implement
 `native_compare` to interpret the original `parser::Comparator` and
 `parser::Value`, including quoting, wildcard equality, containment, and NULL
-semantics. Implement `ilike` for global substring searches. Application-defined
+semantics. Implement `ilike` for default substring searches. The default `field_search` and
+`global_search` methods preserve compatibility; override them to receive the
+original `parser::Value`, including its quoting flag. Application-defined
 fields use `FieldType::Custom { nullable }` and `custom_compare`. See the
 [changelog](CHANGELOG.md) for beta migration notes.
 

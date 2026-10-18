@@ -65,3 +65,7 @@ required-features = ["postgres"]
 
 [dev-dependencies]
 diesel = { workspace = true, default-features = false, features = ["32-column-tables"] }
+
+[[example]]
+name = "postgres_search"
+required-features = ["postgres"]
