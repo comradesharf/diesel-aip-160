@@ -1,4 +1,4 @@
-# Releasing 0.1.0-beta.7
+# Releasing 0.1.0-beta.8
 
 Release notes and migration guidance are in [CHANGELOG.md](CHANGELOG.md).
 Both crates use the workspace version; publish the derive crate first so the
@@ -46,32 +46,33 @@ cargo publish -p diesel-aip-160 --locked
 After both versions are published, tag the release commit and push the tag:
 
 ```sh
-git tag -a v0.1.0-beta.7 -m 'Release 0.1.0-beta.7'
-git push origin v0.1.0-beta.7
+git tag -a v0.1.0-beta.8 -m 'Release 0.1.0-beta.8'
+git push origin v0.1.0-beta.8
 ```
 
-Use the beta.7 changelog section as the release description. Package dry runs,
+Use the beta.8 changelog section as the release description. Package dry runs,
 publication, and tagging are separate steps; preparing these files does not
 publish a release.
 
 ## Preparation checks (2026-10-18)
 
-- Both workspace crates, their dependency requirement, lockfile, and installation
-  examples use `0.1.0-beta.7`. Release notes and beta.6 migration guidance are
-  in the changelog.
+- Both workspace crates, the runtime's derive dependency, lockfile, and
+  installation examples use `0.1.0-beta.8`. The changelog includes prefix-search
+  release notes, breaking API changes, and migration guidance from beta.7.
 - Formatting, locked workspace tests, and Clippy passed offline with the pinned
   Rust 1.99.0 toolchain.
 - All-target tests, doctests, Clippy, and strict rustdoc (`-D warnings`) passed
   separately for `sqlite-integration`, `mysql`, and `postgres` with `native-types`.
 - Docker PostgreSQL, MySQL, and SQLite execution suites passed with Rust 1.99.1,
-  including the ignored PostgreSQL and MySQL tests. The Compose test services
-  ran under isolated project `aip160-beta7-release` with host database ports
-  disabled; its containers and volumes were removed after validation.
+  including ignored tests and PostgreSQL prefix-search execution, autocomplete,
+  ranking, and GIN index eligibility. Compose ran under isolated project
+  `aip160-beta8-release` with host database ports disabled; its containers and
+  volumes were removed after validation.
 - `cargo package -p diesel-aip-160-derive --locked --offline --allow-dirty`
-  built and verified the beta.7 archive. Both crates now include the MIT license
-  text; the runtime package file list also includes search/ranking source,
-  examples, and tests.
-- Runtime packaging was attempted offline and cannot resolve the unpublished
-  `diesel-aip-160-derive ^0.1.0-beta.7` from the local crates.io index. Repeat
-  its dry run after publishing the derive crate and waiting for registry
+  built and verified the beta.8 archive. Both package file lists include the MIT
+  license; the runtime list includes search/ranking source, examples, and the
+  prefix-search regression tests.
+- Runtime packaging was attempted offline and cannot resolve
+  `diesel-aip-160-derive ^0.1.0-beta.8` from the local crates.io index. Repeat
+  its dry run after publishing the matching derive crate and waiting for registry
   availability. No publication or release tag has been performed.
