@@ -5,6 +5,8 @@ public APIs and filter behavior; pin the exact version when upgrading.
 
 ## Unreleased
 
+## 0.1.0-beta.7 — 2026-10-18
+
 ### Added
 
 - Opt-in `compile_query_filter()` compiles predicates and named, typed ranking
@@ -28,11 +30,28 @@ public APIs and filter behavior; pin the exact version when upgrading.
   deduplication uses typed identities instead of formatted strings. Search
   policy and SQL live in `search::postgres`, separate from generic ranking.
 - Ranking signals use Diesel's standard nonaggregate expression bounds, including
-  bound constants. `sql_type` is now an immutable `sql_type()` accessor. Common
+  bound constants. SQL type metadata is exposed through an immutable
+  `sql_type()` accessor. Common
   backend, predicate, adapter, and ranking types are re-exported at the crate root.
 - Finalized text composites no longer carry a single leaf's deduplication identity.
   Reusing a compiled score through an adapter retains it as an independent signal;
   applications must disambiguate repeated names as with other adapter metrics.
+
+### Fixed
+
+- Both published crate archives now include the MIT license text.
+
+### Migration from beta.6
+
+- Update both crates together to `0.1.0-beta.7` before using ranking hooks and
+  generated query-filter compilation.
+- Existing `compile_filter()` calls and adapters keep their predicate behavior.
+  Opt in to `compile_query_filter()` to retrieve ranking signals, then choose an
+  explicit ordering policy; predicates alone do not order results.
+- Custom ranking code can inspect SQL types through `RankingSignal::sql_type()`.
+  Repeated signal names must be disambiguated before applying an ordering policy.
+- Review the guide's Boolean and NULL ranking semantics: signals in unmatched
+  OR branches remain available, while odd negation suppresses contributions.
 
 ## 0.1.0-beta.6 — 2026-10-18
 
