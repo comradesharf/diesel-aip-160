@@ -2,7 +2,7 @@
 
 Derive macros for compiling AIP-160 filters against Diesel models.
 
-**Status: beta (`0.1.0-beta.7`).** Prefer the macros re-exported by
+**Status: beta (`0.1.0-beta.8`).** Prefer the macros re-exported by
 [`diesel-aip-160`](../diesel-aip-160), which provides the parser, compiler,
 and runtime helpers used by generated code.
 

@@ -5,6 +5,8 @@ public APIs and filter behavior; pin the exact version when upgrading.
 
 ## Unreleased
 
+## 0.1.0-beta.8 — 2026-10-18
+
 ### Added
 
 - Explicit trailing-wildcard search extension: `field:sen*` and global `sen*`
@@ -27,6 +29,22 @@ public APIs and filter behavior; pin the exact version when upgrading.
   equality/wildcard equality/presence retain their meanings.
 - Exhaustive AST matches must handle `Expression::Search`. See the runtime
   README's “Migrating search adapters and compilers” section for migration.
+
+### Migration from beta.7
+
+- Update both crates together to `0.1.0-beta.8`; generated search code requires
+  the matching runtime API.
+- Change custom search hooks, adapters, and PostgreSQL helper calls from `&Value`
+  to `&SearchTerm`. Use the term's text and search kind explicitly; comparison
+  hooks continue to accept `Value`.
+- Opt adapters into prefixes with `SUPPORTS_PREFIX` only when both matching and
+  ranking support them. Custom compilers declare support with `supports_prefix`.
+- Add `Expression::Search` to exhaustive AST matches. Use `autocomplete` or
+  `autocomplete_field` with `compile_search` for literal autocomplete input.
+- Review existing unquoted search values containing `*`: only a single trailing
+  wildcard is accepted as a prefix. Quote stars intended as literal text.
+- See the runtime guide's “Migrating search adapters and compilers” section for
+  implementation details and global-prefix capability requirements.
 
 ## 0.1.0-beta.7 — 2026-10-18
 
